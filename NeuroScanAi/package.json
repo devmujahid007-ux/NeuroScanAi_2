@@ -1,0 +1,14 @@
+{
+  "name": "neuroscanaiz",
+  "version": "1.0.0",
+  "description": "NeuroScanAI - Frontend + Backend",
+  "scripts": {
+    "backend": "cd backend && venv\\Scripts\\activate && python -m uvicorn main:app --reload --port 8000",
+    "frontend": "cd frontend\\Tumer-Alzheimer-Detection\\t-a-det && npm start",
+    "dev": "concurrently \"npm run backend\" \"npm run frontend\"",
+    "setup": "cd backend && python -m venv venv && venv\\Scripts\\activate && pip install -r requirements.txt && cd ..\\frontend\\Tumer-Alzheimer-Detection\\t-a-det && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

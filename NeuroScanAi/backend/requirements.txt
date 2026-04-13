@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+pymysql
+python-multipart
+email-validator
+passlib[bcrypt]
+python-jose[cryptography]
+python-dotenv
+pydantic
+werkzeug
+torch>=2.0.0
+numpy>=1.24.0
+Pillow>=10.0.0
+nibabel>=5.0.0
+pydicom>=2.4.0

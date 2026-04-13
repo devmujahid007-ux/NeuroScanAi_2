@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NeuroScan AI — Recent Analyses Report</title>
+  <style>
+    body{font-family:Inter, system-ui, Arial, sans-serif;padding:20px}
+    table{border-collapse:collapse;width:100%}
+    th,td{border:1px solid #ddd;padding:8px;text-align:left}
+    th{background:#f4f4f4}
+    img.thumb{max-width:120px;max-height:90px}
+    .confidence{font-weight:700}
+  </style>
+</head>
+<body>
+  <h1>Recent Analyses</h1>
+  <p>This report was generated from the backend `GET /api/analyses/recent` snapshot.</p>
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Scan ID</th><th>Date</th><th>Label</th><th>Confidence</th><th>Image</th><th>Notes</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <script>
+    // Embedded data (snapshot)
+    const data = 
+    /* BEGIN SNAPSHOT */
+    [
+      {
+        "id": 8,
+        "diagnosis_id": 8,
+        "scan_id": 19,
+        "patient": {"name": "patient", "age": null, "patientId": null},
+        "date": "2026-02-28T12:10:39",
+        "imageUrl": "/uploads/649e29e3078b41ebba4998dd64490388.dat",
+        "prediction": "AMCI suspected",
+        "label": "AMCI suspected",
+        "confidence": 88.0,
+        "explanation": "Model v1.0-det predicted AMCI suspected (88.0%).",
+        "suggestedNextSteps": ["Consult neurology for confirmation.", "Recommend follow-up imaging as clinically indicated."]
+      },
+      {
+        "id": 7,
+        "diagnosis_id": 7,
+        "scan_id": 18,
+        "patient": {"name": "patient", "age": null, "patientId": null},
+        "date": "2026-02-28T12:01:42",
+        "imageUrl": "/uploads/a9a91c60d5d94562aafd34dc62c5f187.jpeg",
+        "prediction": "No abnormality",
+        "label": "No abnormality",
+        "confidence": 89.0,
+        "explanation": "Model v1.0-det predicted No abnormality (89.0%).",
+        "suggestedNextSteps": ["Consult neurology for confirmation.", "Recommend follow-up imaging as clinically indicated."]
+      },
+      {
+        "id": 6,
+        "diagnosis_id": 6,
+        "scan_id": 17,
+        "patient": {"name": "patient", "age": null, "patientId": null},
+        "date": "2026-02-28T11:53:27",
+        "imageUrl": "/uploads/d85efd396fde44ecb6f6860358e10994.dat",
+        "prediction": "AMCI suspected",
+        "label": "AMCI suspected",
+        "confidence": 72.0,
+        "explanation": "Model v1.0-det predicted AMCI suspected (72.0%).",
+        "suggestedNextSteps": ["Consult neurology for confirmation.", "Recommend follow-up imaging as clinically indicated."]
+      }
+    ]
+    /* END SNAPSHOT */;
+
+    const base = 'http://127.0.0.1:8000';
+    const tbody = document.getElementById('rows');
+    data.forEach(a => {
+      const tr = document.createElement('tr');
+      const imgUrl = a.imageUrl ? (base + a.imageUrl) : '';
+      tr.innerHTML = `
+        <td>${a.id}</td>
+        <td>${a.scan_id}</td>
+        <td>${new Date(a.date).toLocaleString()}</td>
+        <td>${a.label}</td>
+        <td class="confidence">${a.confidence}%</td>
+        <td>${imgUrl ? `<a href="${imgUrl}" target="_blank"><img src="${imgUrl}" class="thumb" alt="scan"></a>` : ''}</td>
+        <td><details><summary>Explanation</summary><div>${a.explanation}</div><div><strong>Next:</strong><ul>${(a.suggestedNextSteps||[]).map(s=>`<li>${s}</li>`).join('')}</ul></div></details></td>
+      `;
+      tbody.appendChild(tr);
+    });
+  </script>
+</body>
+</html>

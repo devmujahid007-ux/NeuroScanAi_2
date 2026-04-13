@@ -1,0 +1,102 @@
+[
+  {
+    "id": 8,
+    "diagnosis_id": 8,
+    "scan_id": 19,
+    "patient": {
+      "name": "patient",
+      "age": null,
+      "patientId": null
+    },
+    "date": "2026-02-28T12:10:39",
+    "imageUrl": "/uploads/649e29e3078b41ebba4998dd64490388.dat",
+    "prediction": "AMCI suspected",
+    "label": "AMCI suspected",
+    "confidence": 88.0,
+    "explanation": "Model v1.0-det predicted AMCI suspected (88.0%).",
+    "suggestedNextSteps": [
+      "Consult neurology for confirmation.",
+      "Recommend follow-up imaging as clinically indicated."
+    ]
+  },
+  {
+    "id": 7,
+    "diagnosis_id": 7,
+    "scan_id": 18,
+    "patient": {
+      "name": "patient",
+      "age": null,
+      "patientId": null
+    },
+    "date": "2026-02-28T12:01:42",
+    "imageUrl": "/uploads/a9a91c60d5d94562aafd34dc62c5f187.jpeg",
+    "prediction": "No abnormality",
+    "label": "No abnormality",
+    "confidence": 89.0,
+    "explanation": "Model v1.0-det predicted No abnormality (89.0%).",
+    "suggestedNextSteps": [
+      "Consult neurology for confirmation.",
+      "Recommend follow-up imaging as clinically indicated."
+    ]
+  },
+  {
+    "id": 6,
+    "diagnosis_id": 6,
+    "scan_id": 17,
+    "patient": {
+      "name": "patient",
+      "age": null,
+      "patientId": null
+    },
+    "date": "2026-02-28T11:53:27",
+    "imageUrl": "/uploads/d85efd396fde44ecb6f6860358e10994.dat",
+    "prediction": "AMCI suspected",
+    "label": "AMCI suspected",
+    "confidence": 72.0,
+    "explanation": "Model v1.0-det predicted AMCI suspected (72.0%).",
+    "suggestedNextSteps": [
+      "Consult neurology for confirmation.",
+      "Recommend follow-up imaging as clinically indicated."
+    ]
+  },
+  {
+    "id": 5,
+    "diagnosis_id": 5,
+    "scan_id": 16,
+    "patient": {
+      "name": "patient",
+      "age": null,
+      "patientId": null
+    },
+    "date": "2026-02-28T11:39:06",
+    "imageUrl": "/uploads/6a7e43aa3207458f8916f08398f5b6a7.dat",
+    "prediction": "Glioma likely",
+    "label": "Glioma likely",
+    "confidence": 92.0,
+    "explanation": "Model v1.0-det predicted Glioma likely (92.0%).",
+    "suggestedNextSteps": [
+      "Consult neurology for confirmation.",
+      "Recommend follow-up imaging as clinically indicated."
+    ]
+  },
+  {
+    "id": 4,
+    "diagnosis_id": 4,
+    "scan_id": 15,
+    "patient": {
+      "name": "patient",
+      "age": null,
+      "patientId": null
+    },
+    "date": "2026-02-28T11:37:32",
+    "imageUrl": "/uploads/fa8d0f4c8ce84739888ebea0df9c577f.dat",
+    "prediction": "No abnormality",
+    "label": "No abnormality",
+    "confidence": 94.0,
+    "explanation": "Model v1.0-det predicted No abnormality (94.0%).",
+    "suggestedNextSteps": [
+      "Consult neurology for confirmation.",
+      "Recommend follow-up imaging as clinically indicated."
+    ]
+  }
+]

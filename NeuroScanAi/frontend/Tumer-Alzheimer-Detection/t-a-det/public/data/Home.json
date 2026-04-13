@@ -1,0 +1,59 @@
+{
+  "howItWorksSteps": [
+    {
+      "step": 1,
+      "title": "Upload",
+      "desc": "Securely upload one or multiple MRI DICOM/PNG slices."
+    },
+    {
+      "step": 2,
+      "title": "Analyze",
+      "desc": "Our AI analyzes the scans and highlights regions of interest with confidence scores."
+    },
+    {
+      "step": 3,
+      "title": "Report",
+      "desc": "Export clinician-ready reports (PDF) and review detailed visualizations."
+    }
+  ],
+
+  "recentAnalyses": [
+    {
+      "id": 1,
+      "image": "/images/sample1.jpg",
+      "patientLabel": "Patient #431",
+      "timeLabel": "2 days ago",
+      "prediction": "Glioma",
+      "confidence": 85,
+      "viewUrl": "/results/1",
+      "downloadUrl": "/results/1/download"
+    },
+    {
+      "id": 2,
+      "image": "/images/sample1.jpg",
+      "patientLabel": "Patient #432",
+      "timeLabel": "3 days ago",
+      "prediction": "Meningioma",
+      "confidence": 75,
+      "viewUrl": "/results/2",
+      "downloadUrl": "/results/2/download"
+    },
+    {
+      "id": 3,
+      "image": "/images/sample1.jpg",
+      "patientLabel": "Patient #433",
+      "timeLabel": "5 days ago",
+      "prediction": "Pituitary",
+      "confidence": 65,
+      "viewUrl": "/results/3",
+      "downloadUrl": "/results/3/download"
+    }
+  ],
+
+  "exampleOutcome": {
+    "heading": "Example outcome",
+    "title": "Glioma detected",
+    "confidenceText": "92%",
+    "note": "Region highlighted and suggested follow-up: Biopsy and consult neuro-oncology."
+  }
+}

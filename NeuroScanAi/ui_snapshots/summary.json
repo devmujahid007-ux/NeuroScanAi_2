@@ -1,0 +1,47 @@
+{
+  "email": "doctor+20260228121038@example.com",
+  "register_status": 200,
+  "register_body": {
+    "id": 9,
+    "email": "doctor+20260228121038@example.com",
+    "role": "doctor"
+  },
+  "login_status": 200,
+  "token_present": true,
+  "upload_status": 200,
+  "upload_body": {
+    "id": 19,
+    "patient_id": null,
+    "doctor_id": 9,
+    "file_path": "D:\\FYP-Code\\web\\Frontend + Backend\\NeuroScanAi\\backend\\uploads\\649e29e3078b41ebba4998dd64490388.dat",
+    "upload_date": "2026-02-28T12:10:39"
+  },
+  "run_status": 200,
+  "run_body": {
+    "status": "ok",
+    "analysis": {
+      "id": 8,
+      "diagnosis_id": 8,
+      "scan_id": 19,
+      "patient": {
+        "name": "patient",
+        "age": null,
+        "patientId": null
+      },
+      "date": "2026-02-28T12:10:39",
+      "imageUrl": "/uploads/649e29e3078b41ebba4998dd64490388.dat",
+      "prediction": "AMCI suspected",
+      "label": "AMCI suspected",
+      "confidence": 88.0,
+      "explanation": "Model v1.0-det predicted AMCI suspected (88.0%).",
+      "suggestedNextSteps": [
+        "Consult neurology for confirmation.",
+        "Recommend follow-up imaging as clinically indicated."
+      ]
+    }
+  },
+  "recent_status": 200,
+  "recent_count": 5,
+  "home_status": 200,
+  "doctor_snapshot": "saved"
+}

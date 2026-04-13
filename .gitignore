@@ -1,0 +1,58 @@
+# Node
+node_modules/
+
+venv/
+node_modules/
+__pycache__/
+*.pth
+*.pt
+*.nii
+*.nii.gz
+*.zip
+*.rar
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# AI / Medical
+*.pth
+*.pt
+*.nii
+*.nii.gz
+*.h5
+
+# Uploads / Data
+uploads/
+backend/uploads/
+*.nii.gz
+
+# Data
+*.nii
+*.nii.gz
+
+# Logs
+*.log
+
+# Env
+.env
+
+# Editor
+.vscode/
+
+# Build
+build/
+dist/
+
+# Build
+build/
+build-codex/
+
+# Zip
+*.zip
+*.rar
+
+# OS
+.DS_Store
+Thumbs.db
