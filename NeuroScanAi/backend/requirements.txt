@@ -1,16 +1,35 @@
+# ===== FastAPI Backend =====
 fastapi
 uvicorn
+python-multipart
+pydantic
+python-dotenv
+
+# ===== Database =====
 sqlalchemy
 pymysql
-python-multipart
+
+# ===== Auth =====
 email-validator
 passlib[bcrypt]
 python-jose[cryptography]
-python-dotenv
-pydantic
-werkzeug
+
+# ===== AI / Deep Learning =====
 torch>=2.0.0
+torchvision
+
+# ===== Image Processing =====
 numpy>=1.24.0
 Pillow>=10.0.0
+opencv-python
+matplotlib
+
+# ===== Utilities =====
+requests
+tqdm
+scipy
+werkzeug
+
+# ===== (Optional - keep if future medical use) =====
 nibabel>=5.0.0
 pydicom>=2.4.0

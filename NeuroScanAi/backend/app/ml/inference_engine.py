@@ -248,9 +248,31 @@ def get_loaded_model_or_error():
     return model
 
 
+def _build_segmentation_model(in_channels: int, out_channels: int):
+    try:
+        from monai.networks.nets import SegResNet
+    except ImportError as e:
+        raise InferenceError("model_unavailable", f"Missing MONAI/PyTorch dependency: {e}") from e
+
+    blocks_down = tuple(int(x.strip()) for x in os.getenv("MONAI_SEG_BLOCKS_DOWN", "1,2,2,4").split(",") if x.strip())
+    blocks_up = tuple(int(x.strip()) for x in os.getenv("MONAI_SEG_BLOCKS_UP", "1,1,1").split(",") if x.strip())
+    init_filters = int(os.getenv("MONAI_SEG_INIT_FILTERS", "16"))
+    dropout_prob = float(os.getenv("MONAI_SEG_DROPOUT_PROB", "0.2"))
+
+    return SegResNet(
+        spatial_dims=3,
+        in_channels=in_channels,
+        out_channels=out_channels,
+        init_filters=init_filters,
+        blocks_down=blocks_down,
+        blocks_up=blocks_up,
+        dropout_prob=dropout_prob,
+    )
+
+
 def get_loaded_segmentation_model_or_error():
     """
-    Load trained MONAI 3D UNet checkpoint for segmentation inference.
+    Load trained MONAI 3D segmentation checkpoint for inference.
     """
     global _SEG_MODEL, _SEG_MODEL_LOAD_ERROR
     if _SEG_MODEL is not None:
@@ -258,29 +280,27 @@ def get_loaded_segmentation_model_or_error():
 
     try:
         import torch
-        from monai.networks.nets import UNet
     except ImportError as e:
-        raise InferenceError("model_unavailable", f"Missing MONAI/PyTorch dependency: {e}") from e
+        raise InferenceError("model_unavailable", f"Missing PyTorch dependency: {e}") from e
 
-    checkpoint_path = os.getenv("SEG_MODEL_PATH", "").strip() or MODEL_PATH
+    checkpoint_path = os.getenv("SEG_MODEL_PATH", "").strip()
+    if not checkpoint_path:
+        checkpoint_path = os.path.join(
+            _BACKEND_DIR,
+            "models",
+            "brats_model",
+            "brats_mri_segmentation",
+            "models",
+            "model.pt",
+        )
     if not os.path.isfile(checkpoint_path):
         _SEG_MODEL_LOAD_ERROR = f"No segmentation checkpoint found at {checkpoint_path}"
         raise InferenceError("model_unavailable", _SEG_MODEL_LOAD_ERROR)
 
     try:
-        channels = tuple(int(x.strip()) for x in os.getenv("MONAI_UNET_CHANNELS", "16,32,64,128,256").split(",") if x.strip())
-        strides = tuple(int(x.strip()) for x in os.getenv("MONAI_UNET_STRIDES", "2,2,2,2").split(",") if x.strip())
-        in_channels = int(os.getenv("MONAI_UNET_IN_CHANNELS", "4"))
-        out_channels = int(os.getenv("MONAI_UNET_OUT_CHANNELS", "4"))
-        num_res_units = int(os.getenv("MONAI_UNET_NUM_RES_UNITS", "2"))
-        model = UNet(
-            spatial_dims=3,
-            in_channels=in_channels,
-            out_channels=out_channels,
-            channels=channels,
-            strides=strides,
-            num_res_units=num_res_units,
-        )
+        in_channels = int(os.getenv("MONAI_SEG_IN_CHANNELS", "4"))
+        out_channels = int(os.getenv("MONAI_SEG_OUT_CHANNELS", "3"))
+        model = _build_segmentation_model(in_channels, out_channels)
 
         device = get_torch_device()
         model = model.to(device)
@@ -290,7 +310,7 @@ def get_loaded_segmentation_model_or_error():
         model.load_state_dict(state_dict)
         model.eval()
     except Exception as e:
-        _SEG_MODEL_LOAD_ERROR = f"Failed to load MONAI UNet checkpoint: {e}"
+        _SEG_MODEL_LOAD_ERROR = f"Failed to load MONAI segmentation checkpoint: {e}"
         raise InferenceError("model_unavailable", _SEG_MODEL_LOAD_ERROR) from e
 
     _SEG_MODEL = model

@@ -235,7 +235,20 @@ def analyze_scan_with_segmentation(
         raise _inference_http_exception(e) from e
     x = image.unsqueeze(0).float().to(device)  # (1, 4, H, W, D)
     spatial = tuple(int(s) for s in x.shape[-3:])
-    roi_size = tuple(max(32, min(128, s)) for s in spatial)
+    default_roi = (240, 240, 160)
+    roi_size = tuple(min(s, r) for s, r in zip(spatial, default_roi))
+
+    def _brats_segmentation_to_label(mask: torch.Tensor) -> torch.Tensor:
+        if mask.ndim != 4 or mask.shape[0] != 3:
+            raise ValueError("Expected 3-channel BRATS segmentation output.")
+        out = torch.zeros(mask.shape[1:], dtype=torch.uint8, device=mask.device)
+        ch0 = mask[0]
+        ch1 = mask[1]
+        ch2 = mask[2]
+        out[ch2] = 4
+        out[ch0 & ~ch2] = 1
+        out[ch1 & ~ch0 & ~ch2] = 2
+        return out
 
     try:
         with torch.no_grad():
@@ -248,8 +261,12 @@ def analyze_scan_with_segmentation(
             )
             if logits.ndim != 5:
                 raise ValueError(f"Expected 5D model output for segmentation, got shape {tuple(logits.shape)}")
-            probs = torch.softmax(logits, dim=1)
-            seg_mask = torch.argmax(probs, dim=1).squeeze(0)  # (H, W, D)
+            if logits.shape[1] == 3:
+                probs = torch.sigmoid(logits)
+                seg_mask = _brats_segmentation_to_label(probs.squeeze(0) > 0.5)
+            else:
+                probs = torch.softmax(logits, dim=1)
+                seg_mask = torch.argmax(probs, dim=1).squeeze(0)
             confidence = float(probs.max(dim=1).values.mean().item())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sliding-window inference failed: {e}") from e

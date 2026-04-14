@@ -31,13 +31,10 @@ def build_monai_inference_transforms():
         from monai.transforms import (
             Compose,
             ConcatItemsd,
-            CropForegroundd,
             EnsureChannelFirstd,
             EnsureTyped,
             LoadImaged,
             NormalizeIntensityd,
-            Orientationd,
-            Spacingd,
         )
     except ImportError as e:
         raise RuntimeError("MONAI is required for preprocessing pipeline") from e
@@ -46,11 +43,8 @@ def build_monai_inference_transforms():
         [
             LoadImaged(keys=list(MODALITY_ORDER)),
             EnsureChannelFirstd(keys=list(MODALITY_ORDER)),
-            Spacingd(keys=list(MODALITY_ORDER), pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
-            Orientationd(keys=list(MODALITY_ORDER), axcodes="RAS"),
             ConcatItemsd(keys=list(MODALITY_ORDER), name="image", dim=0),
             NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
-            CropForegroundd(keys="image", source_key="image"),
             EnsureTyped(keys="image"),
         ]
     )
@@ -84,12 +78,9 @@ def preprocess_four_channel_tensor(image_tensor):
         from monai.data import MetaTensor
         from monai.transforms import (
             Compose,
-            CropForegroundd,
             EnsureChannelFirstd,
             EnsureTyped,
             NormalizeIntensityd,
-            Orientationd,
-            Spacingd,
         )
     except ImportError as e:
         raise RuntimeError("MONAI is required for preprocessing pipeline") from e
@@ -98,10 +89,7 @@ def preprocess_four_channel_tensor(image_tensor):
     pipeline = Compose(
         [
             EnsureChannelFirstd(keys="image"),
-            Spacingd(keys="image", pixdim=(1.0, 1.0, 1.0), mode="bilinear"),
-            Orientationd(keys="image", axcodes="RAS"),
             NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
-            CropForegroundd(keys="image", source_key="image"),
             EnsureTyped(keys="image"),
         ]
     )
