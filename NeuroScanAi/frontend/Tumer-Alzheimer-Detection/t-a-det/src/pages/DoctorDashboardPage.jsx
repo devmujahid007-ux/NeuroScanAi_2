@@ -9,10 +9,9 @@ import {
   getDoctorRequests,
   getMriPreviewMeta,
   me,
-  replaceScanFile,
+  predictTumorSegmentation,
   runAnalysis,
   sendReport,
-  viewModelResult,
 } from "../api";
 
 const StatCard = ({ title, value, subtitle, icon }) => (
@@ -207,6 +206,7 @@ export default function DoctorDashboardPage() {
   const [mriViewer, setMriViewer] = useState(null);
   const [workflowScanId, setWorkflowScanId] = useState("");
   const [modelView, setModelView] = useState(null);
+  const [resultImageTs, setResultImageTs] = useState(0);
   const [viewBusy, setViewBusy] = useState(false);
 
   async function loadRequests() {
@@ -279,38 +279,39 @@ export default function DoctorDashboardPage() {
     }
   };
 
-  const handleViewResult = async () => {
-    if (!workflowScanId) {
-      setError("Select which patient scan you are working on.");
-      return;
-    }
-    const id = Number(workflowScanId);
+  const handlePredict = async () => {
     setViewBusy(true);
     setError(null);
     setUploadNotice(null);
+    setModelView(null);
+
+    const t1c = uploadFiles.t1c;
+    const t1n = uploadFiles.t1n;
+    const t2f = uploadFiles.t2f;
+    const t2w = uploadFiles.t2w;
+
     try {
-      const hasAny = MRI_MODALITIES.some((m) => !!uploadFiles[m]);
-      if (hasAny) {
-        const missing = MRI_MODALITIES.filter((m) => !uploadFiles[m]);
-        if (missing.length > 0) {
-          setError(`Please choose all 4 MRI files before replacing the scan. Missing: ${missing.join(", ")}.`);
-          return;
-        }
-        await replaceScanFile(id, uploadFiles);
-        setUploadFiles({ t1c: null, t1n: null, t2f: null, t2w: null });
-        for (const modality of MRI_MODALITIES) {
-          const input = document.getElementById(`doctor-mri-input-${modality}`);
-          if (input) input.value = "";
-        }
-        setUploadNotice("Files attached to this scan. Running model…");
+      if (!t1c || !t1n || !t2f || !t2w) {
+        setError("Please upload all 4 MRI scans");
+        return;
       }
-      const data = await viewModelResult(id);
-      setModelView(data);
-      setUploadNotice(null);
-      await loadRequests();
+
+      const data = await predictTumorSegmentation({ t1c, t1n, t2f, t2w });
+      setModelView({
+        prediction: data?.message || "Prediction completed",
+        confidence: data?.confidence ?? null,
+        probs: data?.probs || null,
+        tumor_volume: data?.tumor_volume || null,
+        output_image_url: data?.output_image || data?.output_image_url || null,
+      });
+      setResultImageTs(Date.now());
+      setUploadFiles({ t1c: null, t1n: null, t2f: null, t2w: null });
+      for (const modality of MRI_MODALITIES) {
+        const input = document.getElementById(`doctor-mri-input-${modality}`);
+        if (input) input.value = "";
+      }
     } catch (err) {
-      setUploadNotice(null);
-      setError(err.message || "View result failed");
+      setError(err.message || "Failed to connect to backend");
       setModelView(null);
     } finally {
       setViewBusy(false);
@@ -517,8 +518,8 @@ export default function DoctorDashboardPage() {
           <div className="mt-5 flex flex-col sm:flex-row flex-wrap gap-3">
             <button
               type="button"
-              onClick={handleViewResult}
-              disabled={viewBusy || !workflowScanId || pendingRequests.length === 0}
+              onClick={handlePredict}
+              disabled={viewBusy}
               className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
             >
               {viewBusy ? "Running model…" : "View result"}
@@ -544,7 +545,7 @@ export default function DoctorDashboardPage() {
               <div className="flex flex-col lg:flex-row gap-6">
                 <div className="flex-1 rounded-lg overflow-hidden border border-slate-200 bg-black shadow-inner">
                   <img
-                    src={`data:image/png;base64,${modelView.visualization_png_base64}`}
+                    src={`${absoluteUrl(modelView.output_image_url)}?t=${resultImageTs}`}
                     alt="Model output slice"
                     className="w-full max-h-[420px] object-contain mx-auto"
                   />
@@ -557,8 +558,14 @@ export default function DoctorDashboardPage() {
                     </div>
                     <div>
                       <span className="text-slate-500 font-sans text-xs uppercase tracking-wide">Confidence</span>
-                      <div>{modelView.confidence}%</div>
+                      <div>{modelView.confidence != null ? `${modelView.confidence}%` : "N/A"}</div>
                     </div>
+                    {modelView.tumor_volume && (
+                      <div>
+                        <span className="text-slate-500 font-sans text-xs uppercase tracking-wide">Tumor Volume</span>
+                        <div>{modelView.tumor_volume}</div>
+                      </div>
+                    )}
                     {modelView.model_version && (
                       <div className="text-xs text-slate-500 font-sans pt-1">{modelView.model_version}</div>
                     )}

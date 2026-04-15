@@ -3,6 +3,7 @@ import base64
 import json
 import os
 from datetime import datetime
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -19,7 +20,7 @@ from app.ml.inference_engine import (
     get_torch_device,
 )
 from app.ml.monai_preprocess import load_and_preprocess_modalities
-from app.ml.tumor_visualization import build_tumor_highlight_png, create_segmentation_overlay
+from app.ml.tumor_visualization import create_segmentation_overlay
 from app.security.jwt import role_required, get_current_user
 
 router = APIRouter(prefix="/api/analyses", tags=["Analyses"])
@@ -104,6 +105,66 @@ def _fetch_accessible_scan(scan_id: int, db: Session, current) -> MRIScan:
     return scan
 
 
+def _run_brats_segmentation(image, model):
+    """
+    Run sliding-window segmentation with shape-safe padding and return:
+      seg_mask (torch.Tensor[D,H,W]), confidence (float in [0, 1])
+    """
+    import torch
+    import torch.nn.functional as F
+    from monai.inferers import sliding_window_inference
+
+    def _brats_segmentation_to_label(mask: torch.Tensor) -> torch.Tensor:
+        if mask.ndim != 4 or mask.shape[0] != 3:
+            raise ValueError("Expected 3-channel BRATS segmentation output.")
+        out = torch.zeros(mask.shape[1:], dtype=torch.uint8, device=mask.device)
+        ch0 = mask[0]
+        ch1 = mask[1]
+        ch2 = mask[2]
+        out[ch2] = 4
+        out[ch0 & ~ch2] = 1
+        out[ch1 & ~ch0 & ~ch2] = 2
+        return out
+
+    device = get_torch_device()
+    x = image.unsqueeze(0).float().to(device)  # (1, 4, D, H, W)
+    orig_shape = tuple(int(s) for s in x.shape[-3:])
+
+    # SegResNet uses multiple down/up sampling stages; pad to multiples of 16.
+    target_shape = tuple(((s + 15) // 16) * 16 for s in orig_shape)
+    pad_d = target_shape[0] - orig_shape[0]
+    pad_h = target_shape[1] - orig_shape[1]
+    pad_w = target_shape[2] - orig_shape[2]
+    if pad_d or pad_h or pad_w:
+        x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
+
+    spatial = tuple(int(s) for s in x.shape[-3:])
+    default_roi = (240, 240, 160)
+    roi_size = tuple(min(s, r) for s, r in zip(spatial, default_roi))
+
+    with torch.no_grad():
+        logits = sliding_window_inference(
+            inputs=x,
+            roi_size=roi_size,
+            sw_batch_size=1,
+            predictor=model,
+            overlap=0.5,
+        )
+        if logits.ndim != 5:
+            raise ValueError(f"Expected 5D model output for segmentation, got shape {tuple(logits.shape)}")
+        if logits.shape[1] == 3:
+            probs = torch.sigmoid(logits)
+            seg_mask = _brats_segmentation_to_label(probs.squeeze(0) > 0.5)
+        else:
+            probs = torch.softmax(logits, dim=1)
+            seg_mask = torch.argmax(probs, dim=1).squeeze(0)
+        confidence = float(probs.max(dim=1).values.mean().item())
+
+    # Crop back to original unpadded shape.
+    seg_mask = seg_mask[: orig_shape[0], : orig_shape[1], : orig_shape[2]]
+    return seg_mask, confidence
+
+
 @router.get("/model-status")
 def model_status(current=Depends(role_required("doctor", "admin"))):
     """Report whether PyTorch and weights are available (no inference on a volume)."""
@@ -152,7 +213,7 @@ def view_model_result(
     db: Session = Depends(get_db),
     current=Depends(role_required("doctor", "admin")),
 ):
-    """Run tumor model on the scan volume and return visualization (colored region if tumor suspected). Does not write reports."""
+    """Run BraTS segmentation model and return overlay visualization."""
     scan_id = payload.get("scan_id")
     if not scan_id:
         raise HTTPException(status_code=400, detail="scan_id required")
@@ -160,43 +221,54 @@ def view_model_result(
     scan = _fetch_accessible_scan(scan_id, db, current)
 
     try:
-        result = analyze_image(scan.file_path)
+        image = load_and_preprocess_modalities(scan.file_path)  # (4, H, W, D)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not load/preprocess scan modalities: {e}") from e
+
+    try:
+        import torch
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Inference dependencies missing: {e}") from e
+
+    device = get_torch_device()
+    try:
+        model = get_loaded_segmentation_model_or_error().to(device)
     except InferenceError as e:
         raise _inference_http_exception(e) from e
 
     try:
-        png_bytes, has_region = build_tumor_highlight_png(scan.file_path, result)
+        seg_mask, confidence = _run_brats_segmentation(image, model)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not build visualization: {e}") from e
+        raise HTTPException(status_code=500, detail=f"Sliding-window inference failed: {e}") from e
 
-    b64 = base64.standard_b64encode(png_bytes).decode("ascii")
-    mask_image_path = None
-    mask_image_base64 = None
-    if result.get("segmentation_mask") is not None:
-        try:
-            mask_out = create_segmentation_overlay(
-                scan_id=scan.id,
-                file_path=scan.file_path,
-                segmentation_output=result.get("segmentation_mask"),
-                output_root=RESULTS_DIR,
-            )
-            mask_image_path = mask_out["image_path"]
-            mask_image_base64 = mask_out["image_base64"]
-        except Exception:
-            # Keep existing view-result behavior even when optional segmentation export fails.
-            mask_image_path = None
-            mask_image_base64 = None
+    try:
+        mask_out = create_segmentation_overlay(
+            scan_id=scan.id,
+            file_path=scan.file_path,
+            segmentation_output=seg_mask.detach().cpu(),
+            output_root=RESULTS_DIR,
+            output_filename="result.png",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not generate/save tumor mask image: {e}") from e
+
+    seg_np = seg_mask.detach().cpu().numpy()
+    unique_vals, unique_counts = np.unique(seg_np, return_counts=True)
+    label_counts = {str(int(v)): int(c) for v, c in zip(unique_vals, unique_counts)}
+    has_region = bool((seg_np > 0).any())
+    prediction = "Tumor Detected" if has_region else "No Tumor Detected"
 
     return {
         "scan_id": scan.id,
-        "prediction": result["label"],
-        "confidence": result["confidence"],
-        "model_version": result.get("model_version"),
-        "probs": result.get("probs"),
+        "prediction": prediction,
+        "confidence": round(confidence * 100.0, 2),
+        "model_version": "MONAI BraTS SegResNet",
+        "probs": label_counts,
         "has_colored_region": has_region,
-        "visualization_png_base64": b64,
-        "mask_image_path": mask_image_path,
-        "mask_image_base64": mask_image_base64,
+        "visualization_png_base64": mask_out["image_base64"],
+        "mask_image_path": mask_out["image_path"],
+        "mask_image_base64": mask_out["image_base64"],
+        "output_image_url": "/uploads/results/result.png",
     }
 
 
@@ -233,41 +305,8 @@ def analyze_scan_with_segmentation(
         model = get_loaded_segmentation_model_or_error().to(device)
     except InferenceError as e:
         raise _inference_http_exception(e) from e
-    x = image.unsqueeze(0).float().to(device)  # (1, 4, H, W, D)
-    spatial = tuple(int(s) for s in x.shape[-3:])
-    default_roi = (240, 240, 160)
-    roi_size = tuple(min(s, r) for s, r in zip(spatial, default_roi))
-
-    def _brats_segmentation_to_label(mask: torch.Tensor) -> torch.Tensor:
-        if mask.ndim != 4 or mask.shape[0] != 3:
-            raise ValueError("Expected 3-channel BRATS segmentation output.")
-        out = torch.zeros(mask.shape[1:], dtype=torch.uint8, device=mask.device)
-        ch0 = mask[0]
-        ch1 = mask[1]
-        ch2 = mask[2]
-        out[ch2] = 4
-        out[ch0 & ~ch2] = 1
-        out[ch1 & ~ch0 & ~ch2] = 2
-        return out
-
     try:
-        with torch.no_grad():
-            logits = sliding_window_inference(
-                inputs=x,
-                roi_size=roi_size,
-                sw_batch_size=1,
-                predictor=model,
-                overlap=0.25,
-            )
-            if logits.ndim != 5:
-                raise ValueError(f"Expected 5D model output for segmentation, got shape {tuple(logits.shape)}")
-            if logits.shape[1] == 3:
-                probs = torch.sigmoid(logits)
-                seg_mask = _brats_segmentation_to_label(probs.squeeze(0) > 0.5)
-            else:
-                probs = torch.softmax(logits, dim=1)
-                seg_mask = torch.argmax(probs, dim=1).squeeze(0)
-            confidence = float(probs.max(dim=1).values.mean().item())
+        seg_mask, confidence = _run_brats_segmentation(image, model)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sliding-window inference failed: {e}") from e
 

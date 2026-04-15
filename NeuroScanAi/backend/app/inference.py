@@ -1,6 +1,7 @@
 import torch
 from monai.inferers import sliding_window_inference
 import numpy as np
+from app.ml.inference_engine import analyze_mri_volume
 
 
 def predict(model, image, device):
@@ -47,3 +48,10 @@ def predict(model, image, device):
     print("Seg unique values:", np.unique(seg))
 
     return seg
+
+
+def analyze_image(file_path: str) -> dict:
+    """
+    Backward-compatible analysis entrypoint used by API routers.
+    """
+    return analyze_mri_volume(file_path)

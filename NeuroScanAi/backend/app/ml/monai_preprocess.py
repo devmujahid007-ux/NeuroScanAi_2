@@ -10,7 +10,18 @@ MODALITY_ORDER = ("t1c", "t1n", "t2f", "t2w")
 def _build_file_map(folder_path: str) -> dict[str, str]:
     if not folder_path or not os.path.isdir(folder_path):
         raise FileNotFoundError(f"MRI folder not found: {folder_path}")
-    return {name: os.path.join(folder_path, f"{name}.nii.gz") for name in MODALITY_ORDER}
+    file_map: dict[str, str] = {}
+    for name in MODALITY_ORDER:
+        gz_path = os.path.join(folder_path, f"{name}.nii.gz")
+        nii_path = os.path.join(folder_path, f"{name}.nii")
+        if os.path.isfile(gz_path):
+            file_map[name] = gz_path
+        elif os.path.isfile(nii_path):
+            file_map[name] = nii_path
+        else:
+            # Keep expected path for clear missing-modality errors.
+            file_map[name] = gz_path
+    return file_map
 
 
 def _validate_file_map(file_map: dict[str, str]) -> None:

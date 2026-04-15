@@ -162,6 +162,7 @@ def create_segmentation_overlay(
     file_path: str,
     segmentation_output,
     output_root: str | None = None,
+    output_filename: str | None = None,
 ) -> dict:
     """
     Create a colored tumor mask overlay from segmentation output and save it as PNG.
@@ -197,10 +198,11 @@ def create_segmentation_overlay(
     img = Image.fromarray(blended, mode="RGB")
     out_root = output_root or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "results"))
     os.makedirs(out_root, exist_ok=True)
-    out_path = os.path.join(out_root, f"{scan_id}_mask.png")
+    file_name = output_filename or f"{scan_id}_mask.png"
+    out_path = os.path.join(out_root, file_name)
     img.save(out_path, format="PNG", optimize=True)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     b64 = base64.standard_b64encode(buf.getvalue()).decode("ascii")
-    return {"image_path": out_path, "image_base64": b64}
+    return {"image_path": out_path, "image_base64": b64, "image_name": file_name}

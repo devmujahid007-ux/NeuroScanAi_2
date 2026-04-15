@@ -9,21 +9,53 @@ from typing import Dict
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.model_loader import load_model
 from app.preprocessing import load_mri_images, preprocess
 from app.inference import predict
 from app.visualization import save_overlay
+from app.routers.auth import router as auth_router
+from app.routers.users import router as users_router
+from app.routers.patients import router as patients_router
+from app.routers.upload import router as upload_router
+from app.routers.analyses import router as analyses_router, api_router as analyses_api_router
+from app.routers.mri_preview import router as mri_preview_router
+from app.routers.stats import router as stats_router
 
 app = FastAPI()
 
 UPLOAD_DIR = "data/uploads"
 OUTPUT_DIR = "data/outputs"
 OUTPUT_FILE_NAME = "result.png"
+LEGACY_UPLOADS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(LEGACY_UPLOADS_DIR, exist_ok=True)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
+app.mount("/uploads", StaticFiles(directory=LEGACY_UPLOADS_DIR), name="uploads")
+
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(patients_router)
+app.include_router(upload_router)
+app.include_router(analyses_router)
+app.include_router(analyses_api_router)
+app.include_router(mri_preview_router)
+app.include_router(stats_router)
 
 # Load model once
 model, config, device = load_model()

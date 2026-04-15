@@ -346,3 +346,33 @@ export async function getPatientReports() {
   if (!res.ok) throw new Error((await res.json()).detail || "Failed to load reports");
   return res.json();
 }
+
+export async function predictTumorSegmentation(filesByModality) {
+  const formData = new FormData();
+  for (const modality of MRI_MODALITIES) {
+    const file = filesByModality?.[modality];
+    if (!file) {
+      throw new Error(`Missing required file: ${modality}`);
+    }
+    formData.append(modality, file);
+  }
+
+  const res = await fetch(`${BASE_URL}/predict`, {
+    method: "POST",
+    body: formData,
+  });
+
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+
+  if (!res.ok) {
+    const detail = (body && (body.error || parseFastApiDetail(body))) || "Prediction failed";
+    throw new Error(detail);
+  }
+
+  return body;
+}
