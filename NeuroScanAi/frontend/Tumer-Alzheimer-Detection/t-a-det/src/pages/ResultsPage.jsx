@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { absoluteUrl, getAnalysis } from "../api";
+import { absoluteUrl, getAnalysis, reportPdfOpenUrl } from "../api";
 
 export default function ResultsPage() {
   const { reportId } = useParams();
@@ -100,6 +100,14 @@ export default function ResultsPage() {
               <div><strong>Prediction:</strong> {report.label}</div>
               <div><strong>Confidence:</strong> {Math.round(report.confidence)}%</div>
               <div><strong>Scan:</strong> {report.fileName || `Scan #${report.scan_id}`}</div>
+              {report.segmentation && (
+                <>
+                  <div><strong>Estimated volume:</strong> {report.segmentation.tumor_volume_cm3 != null ? `${report.segmentation.tumor_volume_cm3} cm³` : "—"}</div>
+                  <div><strong>Model-indicated location:</strong> {report.segmentation.tumor_location || "—"}</div>
+                  <div><strong>Severity (volume-based):</strong> {report.segmentation.severity || "—"}</div>
+                  <div><strong>AI model:</strong> {report.segmentation.model_name || "—"}</div>
+                </>
+              )}
             </div>
           </div>
 
@@ -107,14 +115,30 @@ export default function ResultsPage() {
             <h2 className="text-sm font-semibold text-slate-800">Actions</h2>
             <div className="mt-3 grid gap-3">
               {report.reportDownloadUrl && (
-                <a
-                  href={absoluteUrl(report.reportDownloadUrl)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-4 py-2 rounded-lg bg-blue-600 text-white text-center hover:bg-blue-700"
-                >
-                  Download Report
-                </a>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const id = Number(report.id);
+                      const url = reportPdfOpenUrl(id, { download: false });
+                      if (url) window.open(url, "_blank", "noopener,noreferrer");
+                    }}
+                    className="w-full px-4 py-2 rounded-lg bg-blue-600 text-white text-center hover:bg-blue-700"
+                  >
+                    View PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const id = Number(report.id);
+                      const url = reportPdfOpenUrl(id, { download: true });
+                      if (url) window.open(url, "_blank", "noopener,noreferrer");
+                    }}
+                    className="w-full px-4 py-2 rounded-lg border border-slate-300 text-slate-800 text-center hover:bg-slate-50"
+                  >
+                    Download PDF
+                  </button>
+                </>
               )}
               <button
                 type="button"

@@ -55,6 +55,19 @@ def init_db():
             report_columns = {col["name"] for col in inspector.get_columns("reports")}
             if "pdf_path" not in report_columns:
                 conn.execute(text("ALTER TABLE reports ADD COLUMN pdf_path VARCHAR(255) NULL"))
+            if "patient_id" not in report_columns:
+                conn.execute(text("ALTER TABLE reports ADD COLUMN patient_id INT NULL"))
+            if "doctor_id" not in report_columns:
+                conn.execute(text("ALTER TABLE reports ADD COLUMN doctor_id INT NULL"))
+            if "created_at" not in report_columns:
+                conn.execute(
+                    text(
+                        "ALTER TABLE reports ADD COLUMN created_at TIMESTAMP NULL "
+                        "DEFAULT CURRENT_TIMESTAMP"
+                    )
+                )
+            if "file_path" not in report_columns:
+                conn.execute(text("ALTER TABLE reports ADD COLUMN file_path VARCHAR(512) NULL"))
 
         if "diagnoses" in table_names:
             dx_columns = {col["name"] for col in inspector.get_columns("diagnoses")}

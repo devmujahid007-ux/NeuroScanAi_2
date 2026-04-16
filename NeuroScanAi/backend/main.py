@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database.db import init_db
-from app.routers import auth, upload, users, analyses, stats, patients, mri_preview
+from app.routers import auth, upload, users, analyses, stats, patients, mri_preview, reports_pdf
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 
@@ -37,6 +37,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Report-Id", "X-Report-File-Url"],
 )
 
 app.include_router(auth.router)
@@ -45,8 +46,13 @@ app.include_router(mri_preview.router)
 app.include_router(users.router)
 app.include_router(analyses.router)
 app.include_router(analyses.api_router)
+app.include_router(analyses.core_router)
 app.include_router(stats.router)
 app.include_router(patients.router)
+app.include_router(reports_pdf.router)
+
+REPORTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "reports"))
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 # Serve uploaded files.
 # Routers save MRI data/results under backend/uploads, so static mount must match.

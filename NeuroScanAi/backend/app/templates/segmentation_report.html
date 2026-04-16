@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+ <meta charset="utf-8"/>
+  <title>NeuroScan AI — Segmentation Report</title>
+  <style>
+    @page { size: A4; margin: 18mm; }
+    body { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; font-size: 11pt; color: #1a1a1a; }
+    h1 { font-size: 18pt; margin: 0 0 8px 0; }
+    h2 { font-size: 13pt; margin: 18px 0 8px 0; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+    .muted { color: #555; font-size: 9.5pt; }
+    table.meta { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    table.meta td { padding: 6px 8px; border: 1px solid #ddd; vertical-align: top; }
+    table.meta td.k { width: 32%; background: #f6f8fa; font-weight: bold; }
+    .figure { margin-top: 10px; text-align: center; page-break-inside: avoid; }
+    .figure img { max-width: 100%; height: auto; border: 1px solid #ddd; }
+    .caption { font-size: 9pt; color: #444; margin-top: 4px; }
+    .box { border: 1px solid #ddd; padding: 10px; background: #fafafa; margin-top: 8px; }
+    .disclaimer { border: 1px solid #c00; padding: 10px; background: #fff5f5; margin-top: 14px; font-size: 10pt; }
+  </style>
+</head>
+<body>
+  <h1>Brain MRI — AI Segmentation Report</h1>
+  <p class="muted">Generated {{ generated_at }} · Report ID {{ report_db_id }}</p>
+
+  <h2>Patient information</h2>
+  <table class="meta">
+    <tr><td class="k">Name</td><td>{{ patient_name }}</td></tr>
+    <tr><td class="k">Patient ID</td><td>{{ patient_id }}</td></tr>
+    <tr><td class="k">Age</td><td>{{ age }}</td></tr>
+    <tr><td class="k">Sex / gender</td><td>{{ gender }}</td></tr>
+    <tr><td class="k">Scan date</td><td>{{ scan_date }}</td></tr>
+  </table>
+
+  <h2>Scan details</h2>
+  <table class="meta">
+    <tr><td class="k">Modality</td><td>Multiparametric brain MRI (registered volumes; BraTS-style modalities)</td></tr>
+    <tr><td class="k">AI model</td><td>{{ model_name }}</td></tr>
+    <tr><td class="k">Scan folder</td><td>{{ scan_folder_label }}</td></tr>
+  </table>
+
+  <h2>Findings</h2>
+  <div class="box">
+    <p>{{ findings_paragraph }}</p>
+    <p><strong>Estimated tumor volume:</strong> {{ tumor_volume_cm3 }} cm³ ({{ tumor_volume_mm3 }} mm³).</p>
+    <p><strong>Model-predicted location (axial centroid):</strong> {{ tumor_location }}.</p>
+    <p><strong>Severity category (volume-based):</strong> {{ severity }}.</p>
+    <p><strong>Mean class confidence (model internal):</strong> {{ confidence_score }}%.</p>
+  </div>
+
+  <h2>AI analysis</h2>
+  <div class="box">
+    <p>{{ analysis_paragraph }}</p>
+    <p class="muted">Class histogram (voxel counts by discrete label): {{ label_histogram }}</p>
+  </div>
+
+  <div class="figure">
+    {% if mri_image_data_uri %}
+    <img src="{{ mri_image_data_uri }}" alt="MRI reference slice"/>
+    <div class="caption">Reference axial MRI (same slice index used for overlay visualization).</div>
+    {% endif %}
+  </div>
+
+  <div class="figure">
+    {% if overlay_image_data_uri %}
+    <img src="{{ overlay_image_data_uri }}" alt="Segmentation overlay"/>
+    <div class="caption">Model overlay: tumor-associated labels projected on the reference MRI (axial).</div>
+    {% endif %}
+  </div>
+
+  <h2>Conclusion</h2>
+  <div class="box">
+    <p>{{ conclusion_paragraph }}</p>
+  </div>
+
+  <div class="disclaimer">
+    <strong>Important:</strong> {{ disclaimer_text }}
+  </div>
+</body>
+</html>

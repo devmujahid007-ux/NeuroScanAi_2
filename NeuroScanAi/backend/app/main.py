@@ -19,8 +19,13 @@ from app.routers.auth import router as auth_router
 from app.routers.users import router as users_router
 from app.routers.patients import router as patients_router
 from app.routers.upload import router as upload_router
-from app.routers.analyses import router as analyses_router, api_router as analyses_api_router
+from app.routers.analyses import (
+    router as analyses_router,
+    api_router as analyses_api_router,
+    core_router as analyses_core_router,
+)
 from app.routers.mri_preview import router as mri_preview_router
+from app.routers.reports_pdf import router as reports_pdf_router
 from app.routers.stats import router as stats_router
 
 app = FastAPI()
@@ -29,10 +34,12 @@ UPLOAD_DIR = "data/uploads"
 OUTPUT_DIR = "data/outputs"
 OUTPUT_FILE_NAME = "result.png"
 LEGACY_UPLOADS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
+REPORTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "reports"))
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(LEGACY_UPLOADS_DIR, exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,6 +50,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Report-Id", "X-Report-File-Url"],
 )
 
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
@@ -54,7 +62,9 @@ app.include_router(patients_router)
 app.include_router(upload_router)
 app.include_router(analyses_router)
 app.include_router(analyses_api_router)
+app.include_router(analyses_core_router)
 app.include_router(mri_preview_router)
+app.include_router(reports_pdf_router)
 app.include_router(stats_router)
 
 # Load model once

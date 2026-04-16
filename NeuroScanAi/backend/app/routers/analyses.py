@@ -5,7 +5,8 @@ import os
 from datetime import datetime
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database.db import SessionLocal
@@ -19,19 +20,27 @@ from app.ml.inference_engine import (
     get_loaded_segmentation_model_or_error,
     get_torch_device,
 )
-from app.ml.monai_preprocess import load_and_preprocess_modalities
+from app.ml.monai_preprocess import _build_file_map, _validate_file_map, load_and_preprocess_modalities
 from app.ml.tumor_visualization import create_segmentation_overlay
+from app.reports.pdf_generator import render_segmentation_report_pdf
+from app.reports.segmentation_metrics import compute_tumor_metrics, voxel_volume_mm3_from_scan_folder
+from app.preprocessing import load_mri_images, preprocess
+from app.inference import predict_segmentation_with_confidence
+from app.model_loader import get_brats_bundle_predictor
+from app.visualization import best_axial_slice_index, save_mri_axial_slice_png, save_overlay
 from app.security.jwt import role_required, get_current_user
 
 router = APIRouter(prefix="/api/analyses", tags=["Analyses"])
 api_router = APIRouter(prefix="/api", tags=["Analyses"])
+core_router = APIRouter(prefix="/api", tags=["Reports"])
 
 # Simple in-memory broadcaster for SSE (sufficient for single-process dev)
 _subscribers: list[asyncio.Queue] = []
-REPORTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "reports"))
+REPORTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "reports"))
 os.makedirs(REPORTS_DIR, exist_ok=True)
 RESULTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "results"))
 os.makedirs(RESULTS_DIR, exist_ok=True)
+UPLOADS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads"))
 
 
 def get_db():
@@ -40,6 +49,25 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+class GenerateReportBody(BaseModel):
+    scan_id: int = Field(..., description="MRI scan to segment and summarize")
+    patient_id: int = Field(..., description="Must match the scan's patient_id")
+    patient_name: str | None = None
+    age: int | None = None
+    gender: str | None = None
+
+
+class SendReportBody(BaseModel):
+    report_id: int
+    patient_id: int
+
+
+def _png_file_data_uri(path: str) -> str:
+    with open(path, "rb") as handle:
+        b64 = base64.standard_b64encode(handle.read()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
 
 
 def _publish(event: dict):
@@ -58,6 +86,48 @@ def _latest_diagnosis_for_scan(db: Session, scan_id: int) -> Diagnosis | None:
         .order_by(Diagnosis.id.desc())
         .first()
     )
+
+
+def _uploads_url_from_abs_path(abs_path: str) -> str | None:
+    if not abs_path:
+        return None
+    candidate = os.path.abspath(abs_path)
+    try:
+        rel = os.path.relpath(candidate, UPLOADS_DIR)
+    except Exception:
+        return None
+    if rel.startswith(".."):
+        return None
+    rel_web = rel.replace("\\", "/")
+    return f"/uploads/{rel_web}"
+
+
+def _scan_preview_url(scan: MRIScan, segmentation_meta: dict | None) -> str | None:
+    if segmentation_meta:
+        overlay = segmentation_meta.get("overlay_image")
+        if isinstance(overlay, str) and overlay.strip():
+            return overlay
+        ref_png = segmentation_meta.get("reference_mri_png")
+        if isinstance(ref_png, str) and ref_png.strip():
+            return ref_png
+
+    path = (scan.file_path or "").strip()
+    if not path:
+        return None
+
+    image_ext = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+    if os.path.isfile(path) and path.lower().endswith(image_ext):
+        return _uploads_url_from_abs_path(path)
+
+    if os.path.isdir(path):
+        try:
+            for name in sorted(os.listdir(path)):
+                p = os.path.join(path, name)
+                if os.path.isfile(p) and name.lower().endswith(image_ext):
+                    return _uploads_url_from_abs_path(p)
+        except Exception:
+            return None
+    return None
 
 
 def _write_report_file(scan: MRIScan, diagnosis: Diagnosis, report: Report) -> str:
@@ -176,8 +246,27 @@ def _serialize_analysis(diagnosis: Diagnosis, report: Report | None, scan: MRISc
     doctor = getattr(scan, "doctor", None)
     patient = getattr(scan, "patient", None)
     report_download_url = None
-    if report and report.pdf_path:
-        report_download_url = f"/uploads/reports/{os.path.basename(report.pdf_path)}"
+    if report and (report.pdf_path or report.file_path):
+        report_download_url = f"/reports/{report.id}"
+    segmentation_meta = None
+    if diagnosis.model_meta:
+        try:
+            raw = json.loads(diagnosis.model_meta)
+            if isinstance(raw, dict) and raw.get("report_type") == "segmentation_pdf":
+                segmentation_meta = {
+                    "tumor_detected": raw.get("tumor_detected"),
+                    "tumor_volume_cm3": raw.get("tumor_volume_cm3"),
+                    "tumor_volume_mm3": raw.get("tumor_volume_mm3"),
+                    "tumor_location": raw.get("tumor_location"),
+                    "severity": raw.get("severity"),
+                    "model_name": raw.get("model_name"),
+                    "scan_date": raw.get("scan_date"),
+                    "overlay_image": raw.get("overlay_image"),
+                    "reference_mri_png": raw.get("reference_mri_png"),
+                }
+        except json.JSONDecodeError:
+            segmentation_meta = None
+    preview_url = _scan_preview_url(scan, segmentation_meta)
     return {
         "id": report.id if report else f"D-{diagnosis.id}",
         "diagnosis_id": diagnosis.id,
@@ -195,7 +284,7 @@ def _serialize_analysis(diagnosis: Diagnosis, report: Report | None, scan: MRISc
             "phone": doctor.phone,
         } if doctor else None,
         "date": diagnosis.scan.upload_date.isoformat() if diagnosis.scan and diagnosis.scan.upload_date else datetime.utcnow().isoformat(),
-        "imageUrl": f"/uploads/{filename}",
+        "imageUrl": preview_url,
         "fileName": filename,
         "prediction": diagnosis.prediction,
         "label": diagnosis.prediction,
@@ -203,6 +292,7 @@ def _serialize_analysis(diagnosis: Diagnosis, report: Report | None, scan: MRISc
         "explanation": report.summary if report else "Automated analysis summary",
         "suggestedNextSteps": (report.recommendation.split("\n") if report and report.recommendation else []),
         "reportDownloadUrl": report_download_url,
+        "segmentation": segmentation_meta,
         "related": [],
     }
 
@@ -478,7 +568,7 @@ def send_report(
         "scan_id": scan.id,
         "status": scan.status.value if hasattr(scan.status, "value") else scan.status,
         "report_id": report.id,
-        "download_url": f"/uploads/reports/{os.path.basename(report.pdf_path)}" if report.pdf_path else None,
+        "download_url": f"/reports/{report.id}" if (report.pdf_path or report.file_path) else None,
     }
 
 
@@ -526,7 +616,7 @@ def get_patient_reports(
             "recommendation": report.recommendation,
             "file_name": file_name,
             "file_url": f"/uploads/{file_name}" if file_name else None,
-            "download_url": f"/uploads/reports/{os.path.basename(report.pdf_path)}" if report.pdf_path else None,
+            "download_url": f"/reports/{report.id}" if report and (report.pdf_path or report.file_path) else None,
         })
 
     return reports_data
@@ -545,3 +635,295 @@ def get_analysis(report_id: int, db: Session = Depends(get_db), current = Depend
     if r == "doctor" and scan.doctor_id != current.id:
         raise HTTPException(status_code=403, detail="Unauthorized")
     return _serialize_analysis(diagnosis, report, scan)
+
+
+@core_router.post("/generate-report")
+def generate_segmentation_report_pdf_endpoint(
+    body: GenerateReportBody,
+    db: Session = Depends(get_db),
+    current=Depends(role_required("doctor", "admin")),
+):
+    """
+    Run the same segmentation stack as ``POST /predict`` (MONAI bundle + ``preprocess`` + sliding window),
+    compute volume / laterality / severity, render PDF, persist Report + Diagnosis, return the PDF bytes.
+    """
+    from app.models.user import User
+
+    scan = _fetch_accessible_scan(body.scan_id, db, current)
+    if scan.patient_id != body.patient_id:
+        raise HTTPException(status_code=400, detail="patient_id does not match this scan")
+
+    patient = db.query(User).filter(User.id == body.patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    display_name = (body.patient_name or patient.name or patient.email or f"Patient {patient.id}").strip()
+    display_age = body.age if body.age is not None else patient.age
+    age_str = str(display_age) if display_age is not None else "Not provided"
+    gender_str = (body.gender or "Not provided").strip()
+
+    # Resolve scan root for BraTS-style 4-modality folders; tolerate legacy single-file paths
+    scan_root = (scan.file_path or "").strip()
+    if scan_root and os.path.isfile(scan_root):
+        scan_root = os.path.dirname(scan_root)
+
+    try:
+        file_map = _build_file_map(scan_root)
+        _validate_file_map(file_map)
+        vis_image = load_mri_images(file_map)
+        image = preprocess(np.copy(vis_image))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not load/preprocess scan modalities: {e}") from e
+
+    try:
+        model, device, _cfg = get_brats_bundle_predictor()
+        seg, conf_pct = predict_segmentation_with_confidence(model, image, device)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Segmentation inference failed: {e}") from e
+
+    try:
+        seg_dhw = np.transpose(seg, (2, 0, 1))
+        vol_shape = tuple(int(x) for x in seg_dhw.shape)
+        voxel_mm3 = voxel_volume_mm3_from_scan_folder(scan.file_path)
+        metrics = compute_tumor_metrics(seg_dhw, vol_shape, voxel_mm3)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not compute tumor metrics: {e}") from e
+
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    overlay_name = f"report_{scan.id}_{ts}_overlay.png"
+    mri_name = f"report_{scan.id}_{ts}_mri.png"
+    overlay_path = os.path.join(RESULTS_DIR, overlay_name)
+    mri_path = os.path.join(RESULTS_DIR, mri_name)
+    try:
+        save_overlay(vis_image, seg, overlay_path)
+        slice_idx = best_axial_slice_index(seg)
+        save_mri_axial_slice_png(vis_image, slice_idx, mri_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not export report images: {e}") from e
+
+    model_name = "MONAI BraTS MRI segmentation bundle (identical pipeline to POST /predict)"
+    tumor_flag = bool(metrics["tumor_detected"])
+    vol_cm3 = float(metrics["tumor_volume_cm3"])
+    vol_mm3 = float(metrics["tumor_volume_mm3"])
+    location = str(metrics["tumor_location"])
+    severity = str(metrics["severity"])
+    label_hist = json.dumps(metrics.get("label_voxel_counts") or {}, sort_keys=True)
+
+    if tumor_flag:
+        findings_paragraph = (
+            f"A tumor-associated signal abnormality is detected in the {location} with an estimated volume of "
+            f"{vol_cm3:.2f} cm³. The lesion is categorized as {severity.lower()}-sized under the automated volume policy."
+        )
+        analysis_paragraph = (
+            "The quantitative summary reflects voxel-wise label assignments produced by the segmentation model "
+            f"(mean class confidence {conf_pct}%). Histogram entries count voxels per discrete label id in the "
+            "model output space."
+        )
+        conclusion_paragraph = (
+            f"The automated read is positive for tumor-associated voxels with {severity.lower()} estimated burden. "
+            "Correlation with clinical findings and standard-of-care imaging is recommended."
+        )
+    else:
+        findings_paragraph = (
+            "No contiguous tumor-associated cluster was segmented above background on this volume with the current "
+            f"model thresholding (estimated volume {vol_cm3:.2f} cm³)."
+        )
+        analysis_paragraph = (
+            f"The model did not assign positive tumor labels to a clinically meaningful region (mean class confidence "
+            f"{conf_pct}%). Histogram entries summarize the full label distribution, including background."
+        )
+        conclusion_paragraph = (
+            "The automated read did not identify a positive tumor segmentation burden on this scan. "
+            "Clinical correlation remains indicated if suspicion persists."
+        )
+
+    disclaimer_text = "AI-generated report. Not a substitute for professional diagnosis."
+
+    template_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "templates"))
+    pdf_name = f"{body.patient_id}_{ts}.pdf"
+    pdf_path = os.path.join(REPORTS_DIR, pdf_name)
+
+    scan_date = scan.upload_date.isoformat() if scan.upload_date else datetime.utcnow().isoformat()
+    scan_folder_label = os.path.basename((scan.file_path or "").rstrip(os.sep)) or str(scan.id)
+
+    jinja_ctx = {
+        "generated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        "report_db_id": "pending",
+        "patient_name": display_name,
+        "patient_id": str(body.patient_id),
+        "age": age_str,
+        "gender": gender_str,
+        "scan_date": scan_date,
+        "model_name": model_name,
+        "scan_folder_label": scan_folder_label,
+        "findings_paragraph": findings_paragraph,
+        "tumor_volume_cm3": f"{vol_cm3:.2f}",
+        "tumor_volume_mm3": f"{vol_mm3:.2f}",
+        "tumor_location": location,
+        "severity": severity,
+        "confidence_score": f"{conf_pct:.2f}",
+        "analysis_paragraph": analysis_paragraph,
+        "label_histogram": label_hist,
+        "mri_image_data_uri": _png_file_data_uri(mri_path),
+        "overlay_image_data_uri": _png_file_data_uri(overlay_path),
+        "conclusion_paragraph": conclusion_paragraph,
+        "disclaimer_text": disclaimer_text,
+    }
+
+    prediction = "Tumor Detected" if tumor_flag else "No Tumor Detected"
+    meta_obj = {
+        "report_type": "segmentation_pdf",
+        "tumor_detected": tumor_flag,
+        "tumor_volume_cm3": round(vol_cm3, 4),
+        "tumor_volume_mm3": round(vol_mm3, 4),
+        "tumor_location": location,
+        "severity": severity,
+        "confidence_score": conf_pct,
+        "model_name": model_name,
+        "scan_date": scan_date,
+        "label_voxel_counts": metrics.get("label_voxel_counts") or {},
+        "overlay_image": f"/uploads/results/{overlay_name}",
+        "reference_mri_png": f"/uploads/results/{mri_name}",
+    }
+    meta_json = json.dumps(meta_obj)
+
+    summary_lines = [
+        f"Prediction: {prediction}",
+        f"Estimated tumor volume: {vol_cm3:.2f} cm³ ({vol_mm3:.2f} mm³)",
+        f"Model-indicated location: {location}",
+        f"Severity (volume rules): {severity}",
+        f"Mean class confidence: {conf_pct}%",
+        f"AI model: {model_name}",
+    ]
+    summary_text = "\n".join(summary_lines)
+    recommendation_text = (
+        "AI-assisted segmentation only. Correlate with clinical examination, institutional protocols, and "
+        "standard-of-care imaging.\n"
+        + disclaimer_text
+    )
+
+    diagnosis = _latest_diagnosis_for_scan(db, scan.id)
+    if diagnosis:
+        diagnosis.disease_type = DiseaseType.tumor
+        diagnosis.prediction = prediction
+        diagnosis.confidence = conf_pct
+        diagnosis.model_version = model_name[:250]
+        diagnosis.model_meta = meta_json
+        db.add(diagnosis)
+        db.commit()
+        db.refresh(diagnosis)
+    else:
+        diagnosis = Diagnosis(
+            scan_id=scan.id,
+            disease_type=DiseaseType.tumor,
+            prediction=prediction,
+            confidence=conf_pct,
+            model_version=model_name[:250],
+            model_meta=meta_json,
+        )
+        db.add(diagnosis)
+        db.commit()
+        db.refresh(diagnosis)
+
+    report = db.query(Report).filter(Report.diagnosis_id == diagnosis.id).first()
+    if not report:
+        report = Report(
+            diagnosis_id=diagnosis.id,
+            patient_id=body.patient_id,
+            doctor_id=current.id,
+            summary=summary_text,
+            recommendation=recommendation_text,
+            pdf_path=None,
+        )
+        db.add(report)
+        db.commit()
+        db.refresh(report)
+    else:
+        report.summary = summary_text
+        report.recommendation = recommendation_text
+        report.patient_id = body.patient_id
+        report.doctor_id = current.id
+        db.add(report)
+        db.commit()
+        db.refresh(report)
+
+    jinja_ctx["report_db_id"] = str(report.id)
+
+    try:
+        render_segmentation_report_pdf(
+            jinja_ctx,
+            template_dir=template_dir,
+            template_name="segmentation_report.html",
+            output_path=pdf_path,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF rendering failed: {e}") from e
+
+    report.pdf_path = pdf_path
+    report.file_path = pdf_path
+    db.add(report)
+    scan.status = ScanStatus.analyzed
+    db.add(scan)
+    db.commit()
+    db.refresh(report)
+
+    payload = _serialize_analysis(diagnosis, report, scan)
+    _publish({"type": "analysis.created", "analysis": payload})
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "report_id": report.id,
+            "message": "Report generated successfully",
+        },
+    )
+
+
+@core_router.post("/send-report")
+def send_report_to_patient(
+    body: SendReportBody,
+    db: Session = Depends(get_db),
+    current=Depends(role_required("doctor", "admin")),
+):
+    """Link a finalized PDF report to the patient's dashboard by marking the scan as reported."""
+    report = db.query(Report).filter(Report.id == body.report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    diagnosis = db.query(Diagnosis).filter(Diagnosis.id == report.diagnosis_id).first()
+    if not diagnosis:
+        raise HTTPException(status_code=404, detail="Diagnosis not found for this report")
+
+    scan = db.query(MRIScan).filter(MRIScan.id == diagnosis.scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    if scan.patient_id != body.patient_id:
+        raise HTTPException(status_code=400, detail="patient_id does not match the scan tied to this report")
+
+    if scan.doctor_id != current.id and (current.role or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Unauthorized: You are not assigned to this scan")
+
+    disk_path = report.file_path or report.pdf_path
+    if not disk_path or not os.path.isfile(disk_path):
+        raise HTTPException(status_code=400, detail="Report PDF is not available on disk")
+
+    report.patient_id = body.patient_id
+    report.doctor_id = current.id
+    db.add(report)
+
+    scan.status = ScanStatus.reported
+    if not scan.sent_date:
+        scan.sent_date = datetime.utcnow()
+    db.add(scan)
+    db.commit()
+
+    return {
+        "message": "Report linked to patient dashboard",
+        "report_id": report.id,
+        "scan_id": scan.id,
+        "patient_id": body.patient_id,
+        "file_url": f"/reports/{report.id}",
+    }

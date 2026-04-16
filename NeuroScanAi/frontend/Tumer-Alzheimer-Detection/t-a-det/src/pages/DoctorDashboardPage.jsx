@@ -1,17 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import LogoutButton from "../components/LogoutButton";
 import {
   MRI_MODALITIES,
   absoluteUrl,
   downloadPatientScanBlob,
   fetchMriPreviewBlob,
+  generateSegmentationReport,
   getDoctorRequests,
   getMriPreviewMeta,
+  listReports,
   me,
   predictTumorSegmentation,
-  runAnalysis,
-  sendReport,
+  reportPdfOpenUrl,
+  sendReportToPatient,
 } from "../api";
 
 const StatCard = ({ title, value, subtitle, icon }) => (
@@ -174,13 +175,6 @@ function MriViewerModal({ scanId, fileLabel, onClose }) {
   );
 }
 
-function diagnosisProbsEntries(diagnosis) {
-  const raw = diagnosis?.model_probs;
-  if (!raw || typeof raw !== "object") return [];
-  const probs = raw.probs && typeof raw.probs === "object" ? raw.probs : raw;
-  return Object.entries(probs);
-}
-
 function isValidMRIFile(file) {
   if (!file) return false;
   const ALLOWED_EXT = [".dcm", ".dicom", ".nii", ".nii.gz"];
@@ -208,31 +202,27 @@ export default function DoctorDashboardPage() {
   const [modelView, setModelView] = useState(null);
   const [resultImageTs, setResultImageTs] = useState(0);
   const [viewBusy, setViewBusy] = useState(false);
+  const [reportList, setReportList] = useState([]);
 
-  async function loadRequests() {
-    setLoading(true);
-    setError(null);
-    try {
-      const [doctorData, requestsData] = await Promise.all([me(), getDoctorRequests()]);
-      setCurrentDoctor(doctorData);
-      setRequests(requestsData || []);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    loadRequests();
+  const openReportPdfDownload = useCallback((reportId) => {
+    const id = Number(reportId);
+    if (!id) return;
+    const url = reportPdfOpenUrl(id, { download: true });
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
   }, []);
 
-  const handleSendReport = async (scanId) => {
+  const sendSegReportToPatient = async ({ reportId, patientId, scanId }) => {
+    if (!reportId || !patientId || scanId == null) {
+      setError("Missing report or patient for this scan.");
+      return;
+    }
     try {
-      setSendingReports((prev) => new Set(prev).add(scanId));
       setError(null);
-      await sendReport(scanId);
-      await loadRequests();
+      setSendingReports((prev) => new Set(prev).add(scanId));
+      await sendReportToPatient(reportId, patientId);
+      await loadRequests({ quiet: true });
+      await loadReportList();
+      setUploadNotice(`Report #${reportId} was sent to the patient.`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -244,19 +234,62 @@ export default function DoctorDashboardPage() {
     }
   };
 
-  const closeMriViewer = useCallback(() => setMriViewer(null), []);
+  async function loadReportList() {
+    try {
+      const rows = await listReports();
+      setReportList(Array.isArray(rows) ? rows : []);
+    } catch {
+      setReportList([]);
+    }
+  }
 
-  const pendingRequests = requests.filter((request) => request.status === "sent");
-  const analyzedRequests = requests.filter((request) => request.status === "analyzed");
-  const reportedRequests = requests.filter((request) => request.status === "reported");
+  async function loadRequests(options = {}) {
+    const quiet = Boolean(options.quiet);
+    if (!quiet) {
+      setLoading(true);
+    }
+    setError(null);
+    try {
+      const [doctorData, requestsData] = await Promise.all([me(), getDoctorRequests()]);
+      setCurrentDoctor(doctorData);
+      const list = requestsData || [];
+      setRequests(list);
+      await loadReportList();
+      return list;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    } finally {
+      if (!quiet) {
+        setLoading(false);
+      }
+    }
+  }
 
   useEffect(() => {
-    if (!workflowScanId && pendingRequests.length > 0) {
-      setWorkflowScanId(String(pendingRequests[0].id));
-    }
-  }, [pendingRequests, workflowScanId]);
+    loadRequests();
+  }, []);
 
-  const selectedWorkflowRequest = pendingRequests.find((r) => String(r.id) === workflowScanId);
+  const closeMriViewer = useCallback(() => setMriViewer(null), []);
+
+  /** Scans that can use the report workflow (stays visible after status moves to analyzed) */
+  const workflowScans = requests.filter((r) => r.status === "sent" || r.status === "analyzed");
+  const openRequestsCount = workflowScans.length;
+  const reportsSentCount = reportList.filter((report) => Boolean(report.sent_to_patient)).length;
+  const totalCasesCount = requests.length;
+
+  useEffect(() => {
+    if (workflowScans.length === 0) {
+      if (workflowScanId) setWorkflowScanId("");
+      return;
+    }
+    const stillExists = workflowScans.some((scan) => String(scan.id) === workflowScanId);
+    if (!workflowScanId || !stillExists) {
+      setWorkflowScanId(String(workflowScans[0].id));
+    }
+  }, [workflowScans, workflowScanId]);
+
+  const selectedWorkflowScan = requests.find((r) => String(r.id) === workflowScanId);
 
   const handleDownloadMri = async () => {
     if (!workflowScanId) {
@@ -266,7 +299,7 @@ export default function DoctorDashboardPage() {
     try {
       setError(null);
       const { blob, filename } = await downloadPatientScanBlob(Number(workflowScanId));
-      const name = selectedWorkflowRequest?.file_name || filename;
+      const name = selectedWorkflowScan?.file_name || filename;
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -283,7 +316,7 @@ export default function DoctorDashboardPage() {
     setViewBusy(true);
     setError(null);
     setUploadNotice(null);
-    setModelView(null);
+       setModelView(null);
 
     const t1c = uploadFiles.t1c;
     const t1n = uploadFiles.t1n;
@@ -292,7 +325,7 @@ export default function DoctorDashboardPage() {
 
     try {
       if (!t1c || !t1n || !t2f || !t2w) {
-        setError("Please upload all 4 MRI scans");
+        setError("Please upload all 4 MRI scans (uses the same tumor segmentation model as /predict).");
         return;
       }
 
@@ -303,6 +336,7 @@ export default function DoctorDashboardPage() {
         probs: data?.probs || null,
         tumor_volume: data?.tumor_volume || null,
         output_image_url: data?.output_image || data?.output_image_url || null,
+        model_version: data?.model_version || null,
       });
       setResultImageTs(Date.now());
       setUploadFiles({ t1c: null, t1n: null, t2f: null, t2w: null });
@@ -319,18 +353,43 @@ export default function DoctorDashboardPage() {
   };
 
   const handleGenerateReport = async () => {
+    if (!modelView) {
+      setError("Run View result (/predict) successfully first, then generate the report.");
+      return;
+    }
     if (!workflowScanId) {
       setError("Select which patient scan you are working on.");
       return;
     }
     const id = Number(workflowScanId);
+    const req = selectedWorkflowScan;
+    if (!req?.patient_id) {
+      setError("Could not resolve patient for this scan.");
+      return;
+    }
     try {
       setAnalyzingScans((prev) => new Set(prev).add(id));
       setError(null);
-      await runAnalysis(id);
-      setModelView(null);
-      await loadRequests();
-      setUploadNotice("Clinical report generated. Find this case under Analyzed — then send the report only to the patient.");
+      const { reportId } = await generateSegmentationReport({
+        scan_id: id,
+        patient_id: req.patient_id,
+        patient_name: req.patient?.name || null,
+        age: req.patient?.age ?? null,
+      });
+
+      const refreshed = await loadRequests({ quiet: true });
+      const row = refreshed?.find((r) => r.id === id);
+      const resolvedReportId =
+        reportId != null && reportId !== "" ? Number(reportId) : row?.diagnosis?.report?.id ?? null;
+
+      await loadReportList();
+      if (resolvedReportId) {
+        const url = reportPdfOpenUrl(resolvedReportId, { download: false });
+        if (url) window.open(url, "_blank", "noopener,noreferrer");
+      }
+      setUploadNotice(
+        "Report generated successfully and saved on the server. The PDF opened in a new tab — use Reports below to view, download, or send to the patient."
+      );
     } catch (err) {
       setError(err.message);
     } finally {
@@ -363,7 +422,7 @@ export default function DoctorDashboardPage() {
         <div>
           <h1 className="text-2xl md:text-3xl font-semibold text-slate-800">Doctor Dashboard</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Download patient MRIs, optionally re-upload from your PC, run the tumor model, generate a report, and send only that report to the patient.
+            Download patient MRIs if needed, re-upload modalities, run the model, generate a PDF report (saved automatically), then send it to the patient from Reports.
           </p>
           {currentDoctor && (
             <p className="text-xs text-slate-400 mt-1">
@@ -395,28 +454,22 @@ export default function DoctorDashboardPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
         <StatCard
           title="Open Requests"
-          value={pendingRequests.length}
-          subtitle="Sent to you by patients"
+          value={openRequestsCount}
+          subtitle="Sent / analyzed and pending delivery"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>}
         />
         <StatCard
-          title="Analyzed"
-          value={analyzedRequests.length}
-          subtitle="Ready to send"
-          icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M5 13l4 4L19 7" /></svg>}
-        />
-        <StatCard
           title="Reports Sent"
-          value={reportedRequests.length}
+          value={reportsSentCount}
           subtitle="Delivered to patients"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 19l9 2-9-18-9 18 9-2m0 0v-8m0 8l-6-4m6 4l6-4" /></svg>}
         />
         <StatCard
           title="Total Cases"
-          value={requests.length}
+          value={totalCasesCount}
           subtitle="All assigned MRI scans"
           icon={<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M17 20h5v-2a3 3 0 00-5.856-1.487M15 10h.01M13 16h2v2l-1 1h-1l-1-1v-2zm-4-4h2v2H9v-2zm0 4h2v2H9v-2z" /></svg>}
         />
@@ -432,7 +485,7 @@ export default function DoctorDashboardPage() {
         <section className="bg-white rounded-2xl shadow-sm p-6 mb-6 border border-slate-200 ring-1 ring-slate-100">
           <h2 className="text-lg font-semibold text-slate-900 mb-4">MRI — view model output &amp; report</h2>
 
-          <div className="grid gap-4 md:grid-cols-2 mb-5">
+          <div className="grid gap-4 md:grid-cols-3 mb-5">
             <div>
               <label className="text-sm font-medium text-slate-700 block mb-2">Patient scan (open request)</label>
               <select
@@ -443,12 +496,12 @@ export default function DoctorDashboardPage() {
                 }}
                 className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
               >
-                {pendingRequests.length === 0 ? (
-                  <option value="">No open requests</option>
+                {workflowScans.length === 0 ? (
+                  <option value="">No active scans (sent / analyzed)</option>
                 ) : (
-                  pendingRequests.map((r) => (
+                  workflowScans.map((r) => (
                     <option key={r.id} value={String(r.id)}>
-                      Scan #{r.id} — {r.patient?.email || "Patient"} — {r.file_name || "MRI"}
+                      Scan #{r.id} — {r.status} — {r.patient?.email || "Patient"} — {r.file_name || "MRI"}
                     </option>
                   ))
                 )}
@@ -458,7 +511,7 @@ export default function DoctorDashboardPage() {
               <button
                 type="button"
                 onClick={handleDownloadMri}
-                disabled={!workflowScanId || pendingRequests.length === 0}
+                disabled={!workflowScanId || workflowScans.length === 0}
                 className="w-full px-4 py-2.5 rounded-lg border border-slate-300 text-slate-800 font-medium hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Download MRI to this PC
@@ -472,7 +525,7 @@ export default function DoctorDashboardPage() {
             <p className="text-sm font-medium text-slate-700 mb-1">Re-upload MRI from this PC (optional)</p>
             <p className="text-xs text-slate-500 mb-3">
               DICOM (<span className="font-mono">.dcm</span>, <span className="font-mono">.dicom</span>) or NIfTI (<span className="font-mono">.nii</span>, <span className="font-mono">.nii.gz</span>).
-              If you choose a file, it replaces the scan on the server when you click <strong>View result</strong>.
+              <strong> View result</strong> runs the legacy <span className="font-mono">/predict</span> tumor segmentation pipeline on these four files (not the BraTS server scan path).
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-left">
               {MRI_MODALITIES.map((modality) => (
@@ -519,26 +572,35 @@ export default function DoctorDashboardPage() {
             <button
               type="button"
               onClick={handlePredict}
-              disabled={viewBusy}
+              disabled={viewBusy || MRI_MODALITIES.some((m) => !uploadFiles[m])}
               className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
             >
-              {viewBusy ? "Running model…" : "View result"}
+              {viewBusy ? "Running model…" : "View result (/predict)"}
             </button>
             <button
               type="button"
               onClick={handleGenerateReport}
+              title={
+                !modelView && workflowScanId && workflowScans.length > 0
+                  ? "Run View result (/predict) successfully first"
+                  : undefined
+              }
               disabled={
                 !workflowScanId ||
-                pendingRequests.length === 0 ||
+                workflowScans.length === 0 ||
+                !modelView ||
                 analyzingScans.has(Number(workflowScanId))
               }
               className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
             >
-              {analyzingScans.has(Number(workflowScanId)) ? "Generating…" : "Generate report"}
+              {analyzingScans.has(Number(workflowScanId)) ? "Generating…" : "Generate report (PDF)"}
             </button>
           </div>
-
-          {uploadNotice && <p className="mt-4 text-sm text-slate-600">{uploadNotice}</p>}
+          {!modelView && workflowScanId && workflowScans.length > 0 ? (
+            <p className="text-xs text-amber-800 mt-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              Upload all four MRI files and click <strong>View result</strong> before <strong>Generate report</strong> is available.
+            </p>
+          ) : null}
 
           {modelView && (
             <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 md:p-6">
@@ -560,14 +622,14 @@ export default function DoctorDashboardPage() {
                       <span className="text-slate-500 font-sans text-xs uppercase tracking-wide">Confidence</span>
                       <div>{modelView.confidence != null ? `${modelView.confidence}%` : "N/A"}</div>
                     </div>
-                    {modelView.tumor_volume && (
-                      <div>
-                        <span className="text-slate-500 font-sans text-xs uppercase tracking-wide">Tumor Volume</span>
-                        <div>{modelView.tumor_volume}</div>
-                      </div>
-                    )}
                     {modelView.model_version && (
                       <div className="text-xs text-slate-500 font-sans pt-1">{modelView.model_version}</div>
+                    )}
+                    {modelView.tumor_volume && (
+                      <div>
+                        <span className="text-slate-500 font-sans text-xs uppercase tracking-wide">Tumor volume (voxel proxy)</span>
+                        <div>{modelView.tumor_volume}</div>
+                      </div>
                     )}
                   </div>
                   {modelView.probs && (
@@ -584,205 +646,85 @@ export default function DoctorDashboardPage() {
               </div>
             </div>
           )}
-        </section>
-      )}
 
-      <div className="space-y-6 scroll-mt-24">
-        <section className="bg-white rounded-2xl shadow-sm p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-slate-800">Open Requests</h2>
-            <span className="text-sm text-slate-500">{pendingRequests.length} waiting</span>
-          </div>
-
-          {pendingRequests.length === 0 ? (
-            <p className="text-slate-500">
-              No open requests right now. If a patient already sent an MRI, confirm they chose your doctor ID and email from
-              their dashboard; mismatched accounts will not show the same queue.
+                   <div className="mt-6 rounded-xl border border-slate-200 bg-white p-4 md:p-6 shadow-sm">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+              <h3 className="text-lg font-semibold text-slate-900">Report history</h3>
+              <span className="text-xs text-slate-500">{reportList.length} saved on server</span>
+            </div>
+            <p className="text-sm text-slate-600 mb-4">
+              PDFs are stored under <span className="font-mono text-xs">/reports</span> on the server and listed via{" "}
+              <span className="font-mono text-xs">GET /reports</span>. <strong>Download</strong> saves the file. Use{" "}
+              <strong>Send to patient</strong> when a report should appear on the patient dashboard.
             </p>
-          ) : (
-            <div className="space-y-4">
-              {pendingRequests.map((request) => (
-                <div key={request.id} className="border rounded-lg p-4 space-y-4">
-                  <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-mono text-slate-600">Scan ID {request.scan_id ?? request.id}</div>
-                      <div className="text-sm font-semibold text-slate-800">{request.file_name || `File #${request.id}`}</div>
-                      <div className="text-xs text-slate-500 mt-1">Patient: {request.patient?.name || request.patient?.email || `Patient #${request.patient_id}`}</div>
-                      <div className="text-xs text-slate-500 mt-1">
-                        Uploaded: {request.upload_date ? new Date(request.upload_date).toLocaleString() : "Unknown"}
-                        {request.sent_date ? (
-                          <span className="ml-2">· Sent to you: {new Date(request.sent_date).toLocaleString()}</span>
+            {reportList.length === 0 ? (
+              <p className="text-sm text-slate-500 bg-slate-50 rounded-lg px-3 py-4 border border-slate-100">
+                No reports yet. Run <strong>View result</strong>, then <strong>Generate report</strong> — the PDF opens in a new tab and appears here.
+              </p>
+            ) : (
+              <ul className="space-y-3">
+                {reportList.map((row) => {
+                  const sentToPatient = Boolean(row.sent_to_patient);
+                  const patientName = row.patient_name || `Patient #${row.patient_id}`;
+                  const dateLabel = row.created_at ? new Date(row.created_at).toLocaleString() : "—";
+                  return (
+                    <li
+                      key={row.id}
+                      className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/80 px-4 py-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-slate-900">{patientName}</div>
+                        <div className="text-xs text-slate-500 mt-0.5">
+                          Report #{row.id} · Scan #{row.scan_id} · {dateLabel}
+                        </div>
+                        <div className="mt-2">
+                          {sentToPatient ? (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                              Sent to patient
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-900">
+                              Not sent yet
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => openReportPdfDownload(row.id)}
+                          className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 text-sm font-medium hover:bg-slate-50"
+                        >
+                          Download
+                        </button>
+                        {!sentToPatient ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              sendSegReportToPatient({
+                                reportId: row.id,
+                                patientId: row.patient_id,
+                                scanId: row.scan_id,
+                              })
+                            }
+                            disabled={sendingReports.has(row.scan_id)}
+                            className="px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {sendingReports.has(row.scan_id) ? "Sending…" : "Send to patient"}
+                          </button>
                         ) : null}
                       </div>
-                    </div>
-                    <span className="inline-block px-2 py-1 rounded bg-blue-100 text-blue-800 font-medium text-xs">
-                      {request.status}
-                    </span>
-                  </div>
-
-                  <div className="grid md:grid-cols-2 gap-3 text-sm text-slate-700">
-                    <div className="bg-slate-50 rounded p-3">
-                      <strong>Patient Email:</strong> {request.patient?.email || "N/A"}
-                    </div>
-                    <div className="bg-slate-50 rounded p-3">
-                      <strong>Patient Age:</strong> {request.patient?.age ?? "N/A"}
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setMriViewer({ id: request.id, label: request.file_name || `scan-${request.id}` })}
-                      className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 font-medium"
-                    >
-                      Open MRI Scan
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setWorkflowScanId(String(request.id));
-                        setShowUploadSection(true);
-                        setModelView(null);
-                      }}
-                      className="px-4 py-2 rounded-lg bg-slate-800 text-white font-medium hover:bg-slate-900"
-                    >
-                      Use in Upload MRI workflow
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="bg-white rounded-2xl shadow-sm p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-slate-800">Analyzed Cases</h2>
-            <span className="text-sm text-slate-500">{analyzedRequests.length} ready</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </div>
 
-          {analyzedRequests.length === 0 ? (
-            <p className="text-slate-500">No analyzed cases waiting to be sent.</p>
-          ) : (
-            <div className="space-y-4">
-              {analyzedRequests.map((request) => (
-                <div key={request.id} className="border border-green-200 bg-green-50 rounded-lg p-4 space-y-4">
-                  <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-mono text-slate-600">Scan ID {request.scan_id ?? request.id}</div>
-                      <div className="text-sm font-semibold text-slate-800">{request.file_name || `File #${request.id}`}</div>
-                      <div className="text-xs text-slate-500 mt-1">Patient: {request.patient?.name || request.patient?.email || `Patient #${request.patient_id}`}</div>
-                    </div>
-                    <span className="inline-block px-2 py-1 rounded bg-green-100 text-green-800 font-medium text-xs">{request.status}</span>
-                  </div>
+          {uploadNotice && <p className="mt-4 text-sm text-slate-600">{uploadNotice}</p>}
 
-                  <div className="bg-white rounded p-3 text-sm space-y-2">
-                    <div><strong>Prediction:</strong> {request.diagnosis?.prediction || "N/A"}</div>
-                    <div><strong>Confidence:</strong> {request.diagnosis?.confidence ? `${request.diagnosis.confidence}%` : "N/A"}</div>
-                    <div><strong>Model:</strong> {request.diagnosis?.model_version || "N/A"}</div>
-                    {diagnosisProbsEntries(request.diagnosis).length > 0 && (
-                      <div className="text-xs font-mono bg-slate-50 rounded p-2 border border-slate-100 space-y-0.5">
-                        {diagnosisProbsEntries(request.diagnosis).map(([k, v]) => (
-                          <div key={k} className="flex justify-between gap-2">
-                            <span>{k}</span>
-                            <span>{v}%</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div><strong>Summary:</strong> {request.diagnosis?.report?.summary || "Not generated"}</div>
-                    <div className="whitespace-pre-line"><strong>Recommendation:</strong> {`\n${request.diagnosis?.report?.recommendation || "Not generated"}`}</div>
-                  </div>
-
-                  <div className="grid md:grid-cols-1 sm:grid-cols-3 gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setMriViewer({ id: request.id, label: request.file_name || `scan-${request.id}` })}
-                      className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50 text-center font-medium"
-                    >
-                      View MRI
-                    </button>
-                    {request.diagnosis?.report?.id ? (
-                      <Link
-                        to={`/results/${request.diagnosis.report.id}`}
-                        className="px-4 py-2 rounded-lg border border-blue-600 text-blue-600 font-medium hover:bg-blue-50 text-center"
-                      >
-                        Open Result
-                      </Link>
-                    ) : (
-                      <div className="px-4 py-2 rounded-lg border border-slate-200 text-slate-400 text-center">
-                        Result not available
-                      </div>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => handleSendReport(request.id)}
-                      disabled={sendingReports.has(request.id)}
-                      className="px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {sendingReports.has(request.id) ? "Sending…" : "Send report only to patient"}
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
         </section>
-
-        <section className="bg-white rounded-2xl shadow-sm p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-slate-800">Reports Sent</h2>
-            <span className="text-sm text-slate-500">{reportedRequests.length} completed</span>
-          </div>
-
-          {reportedRequests.length === 0 ? (
-            <p className="text-slate-500">No reports have been sent yet.</p>
-          ) : (
-            <div className="space-y-3">
-              {reportedRequests.map((request) => (
-                <div key={request.id} className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-4 bg-slate-50 rounded-lg">
-                  <div>
-                    <div className="text-xs font-mono text-slate-500">Scan ID {request.scan_id ?? request.id}</div>
-                    <div className="text-sm font-medium text-slate-800">{request.file_name || `File #${request.id}`}</div>
-                    <div className="text-xs text-slate-500 mt-1">Patient: {request.patient?.name || request.patient?.email || `Patient #${request.patient_id}`}</div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setMriViewer({ id: request.id, label: request.file_name || `scan-${request.id}` })}
-                      className="px-3 py-2 rounded-md border border-slate-300 hover:bg-slate-50 text-sm"
-                    >
-                      View MRI
-                    </button>
-                    {request.diagnosis?.report?.download_url && (
-                      <a
-                        href={absoluteUrl(request.diagnosis.report.download_url)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-3 py-2 rounded-md border border-slate-300 hover:bg-slate-50 text-sm"
-                      >
-                        Download Report
-                      </a>
-                    )}
-                    {request.diagnosis?.report?.id && (
-                      <Link
-                        to={`/results/${request.diagnosis.report.id}`}
-                        className="px-3 py-2 rounded-md border border-blue-600 text-blue-600 hover:bg-blue-50 text-sm"
-                      >
-                        View Result
-                      </Link>
-                    )}
-                    <span className="px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                      Reported
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      </div>
+      )}
 
       {mriViewer && (
         <MriViewerModal scanId={mriViewer.id} fileLabel={mriViewer.label} onClose={closeMriViewer} />

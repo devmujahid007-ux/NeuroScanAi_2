@@ -4,6 +4,8 @@ import torch
 
 MODEL_DIR = "models/brats_model/brats_mri_segmentation"
 
+_bundle_predictor_cache: tuple | None = None
+
 
 def load_model():
     if not os.path.exists(MODEL_DIR):
@@ -28,5 +30,18 @@ def load_model():
 
     model.eval()
 
-    print("✅ Model loaded successfully")
+    global _bundle_predictor_cache
+    _bundle_predictor_cache = (model, device, config)
+    print("Model loaded successfully")
     return model, config, device
+
+
+def get_brats_bundle_predictor():
+    """
+    Same MONAI bundle instance as ``POST /predict`` after ``load_model()`` runs.
+    """
+    global _bundle_predictor_cache
+    if _bundle_predictor_cache is None:
+        load_model()
+    model, device, config = _bundle_predictor_cache
+    return model, device, config

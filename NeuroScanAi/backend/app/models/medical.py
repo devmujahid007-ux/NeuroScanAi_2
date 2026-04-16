@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Text, Enum, ForeignKey, TIMESTAMP
+from sqlalchemy import Column, Integer, String, Float, Text, Enum, ForeignKey, TIMESTAMP, DateTime, func
 from sqlalchemy.orm import relationship
 from app.database.db import Base
 from app.models.user import User
@@ -70,8 +70,13 @@ class Report(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     diagnosis_id = Column(Integer, ForeignKey("diagnoses.id"))
+    patient_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    doctor_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     summary = Column(Text)
     recommendation = Column(Text)
     pdf_path = Column(String(255))
+    # Canonical stored path on disk (same as pdf_path for new reports; exposed as file_path in API)
+    file_path = Column(String(512), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     diagnosis = relationship("Diagnosis", back_populates="report")

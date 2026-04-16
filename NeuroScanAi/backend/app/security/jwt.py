@@ -27,7 +27,8 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+def get_user_from_access_token(db: Session, token: str) -> User:
+    """Validate JWT string (Bearer value) and return the user, or raise HTTPException401."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -38,14 +39,16 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         email: str = payload.get("sub")
         if email is None:
             raise credentials_exception
-        role: str = payload.get("role", "patient")
     except JWTError:
         raise credentials_exception
-
     user = db.query(User).filter(User.email == email).first()
     if user is None:
         raise credentials_exception
     return user
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    return get_user_from_access_token(db, token)
 
 def role_required(*roles: str):
     """Allow access if the user's role matches any required role (case-insensitive)."""

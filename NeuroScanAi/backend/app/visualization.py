@@ -1,5 +1,32 @@
+import matplotlib
+
+matplotlib.use("Agg")  # headless; default GUI backend + uvicorn worker thread hangs/crashes on Windows (tkinter)
+
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+def best_axial_slice_index(seg: np.ndarray) -> int:
+    """Same slice rule as ``save_overlay``: max tumor area per axial slice, else middle."""
+    tumor_area_by_slice = np.count_nonzero(seg > 0, axis=(0, 1))
+    max_tumor_area = int(tumor_area_by_slice.max())
+    if max_tumor_area > 0:
+        return int(np.argmax(tumor_area_by_slice))
+    return int(seg.shape[-1] // 2)
+
+
+def save_mri_axial_slice_png(vis_image: np.ndarray, slice_idx: int, save_path: str) -> str:
+    """
+    Grayscale PNG of T1c (channel 0) at one axial index.
+    ``vis_image`` is raw float (4, H, W, D) before ``preprocess``, same as ``save_overlay`` input.
+    """
+    from PIL import Image
+
+    sl = np.asarray(vis_image[0, :, :, slice_idx], dtype=np.float32)
+    img_slice = _normalize_mri_slice(sl)
+    gray = (np.clip(img_slice, 0.0, 1.0) * 255.0).astype(np.uint8)
+    Image.fromarray(gray, mode="L").save(save_path, format="PNG", optimize=True)
+    return save_path
 
 
 def _normalize_mri_slice(img_slice: np.ndarray) -> np.ndarray:
@@ -22,10 +49,7 @@ def save_overlay(image: np.ndarray, seg: np.ndarray, save_path: str) -> str:
     - 2: edema (yellow)
     - 3: enhancing tumor (blue)
     """
-    # Choose the slice with max tumor area so each case is more representative.
-    tumor_area_by_slice = np.count_nonzero(seg > 0, axis=(0, 1))
-    max_tumor_area = int(tumor_area_by_slice.max())
-    slice_idx = int(np.argmax(tumor_area_by_slice)) if max_tumor_area > 0 else image.shape[-1] // 2
+    slice_idx = best_axial_slice_index(seg)
 
     img_slice = image[0, :, :, slice_idx]
     seg_slice = seg[:, :, slice_idx]

@@ -20,6 +20,12 @@ def get_db():
         db.close()
 
 
+def _assert_admin_or_superadmin(current):
+    role = (getattr(current, "role", "") or "").lower()
+    if role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="Admin permissions required")
+
+
 @router.get("/")
 def list_patients(db: Session = Depends(get_db), current = Depends(get_current_user)):
     # list all users with role 'patient'
@@ -57,6 +63,7 @@ def list_doctors(db: Session = Depends(get_db), current = Depends(get_current_us
 
 @router.post("/")
 def create_patient(payload: dict, db: Session = Depends(get_db), current = Depends(get_current_user)):
+    _assert_admin_or_superadmin(current)
     # minimal validation
     email = payload.get("email")
     name = payload.get("name")
@@ -87,6 +94,7 @@ def create_patient(payload: dict, db: Session = Depends(get_db), current = Depen
 
 @router.put("/{patient_id}")
 def update_patient(patient_id: int, payload: dict, db: Session = Depends(get_db), current = Depends(get_current_user)):
+    _assert_admin_or_superadmin(current)
     p = db.query(User).filter(User.id == patient_id, User.role == "patient").first()
     if not p:
         raise HTTPException(status_code=404, detail="Patient not found")
@@ -104,12 +112,110 @@ def update_patient(patient_id: int, payload: dict, db: Session = Depends(get_db)
 
 @router.delete("/{patient_id}")
 def delete_patient(patient_id: int, db: Session = Depends(get_db), current = Depends(get_current_user)):
+    _assert_admin_or_superadmin(current)
     p = db.query(User).filter(User.id == patient_id, User.role == "patient").first()
     if not p:
         raise HTTPException(status_code=404, detail="Patient not found")
+    linked_scans = db.query(MRIScan).filter(MRIScan.patient_id == patient_id).count()
+    linked_reports = db.query(Report).filter(Report.patient_id == patient_id).count()
+    if linked_scans > 0 or linked_reports > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete patient with linked scans/reports. Keep record for medical history.",
+        )
     db.delete(p)
     db.commit()
     return {"status": "deleted"}
+
+
+@router.post("/doctors")
+def create_doctor(payload: dict, db: Session = Depends(get_db), current=Depends(get_current_user)):
+    _assert_admin_or_superadmin(current)
+    email = (payload.get("email") or "").strip().lower()
+    name = (payload.get("name") or "").strip() or None
+    phone = (payload.get("phone") or "").strip() or None
+    password = payload.get("password") or secrets.token_urlsafe(10)
+    if not email:
+        raise HTTPException(status_code=400, detail="email is required")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="email already registered")
+    new_user = User(
+        email=email,
+        password=generate_password_hash(password),
+        role="doctor",
+        name=name,
+        phone=phone,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {
+        "id": new_user.id,
+        "email": new_user.email,
+        "name": new_user.name,
+        "phone": new_user.phone,
+        "role": new_user.role,
+        "temporary_password": None if payload.get("password") else password,
+    }
+
+
+@router.delete("/doctors/{doctor_id}")
+def delete_doctor(doctor_id: int, db: Session = Depends(get_db), current=Depends(get_current_user)):
+    _assert_admin_or_superadmin(current)
+    d = db.query(User).filter(User.id == doctor_id, func.lower(User.role) == "doctor").first()
+    if not d:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    linked_scans = db.query(MRIScan).filter(MRIScan.doctor_id == doctor_id).count()
+    linked_reports = db.query(Report).filter(Report.doctor_id == doctor_id).count()
+    if linked_scans > 0 or linked_reports > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete doctor with linked scans/reports. Reassign records first.",
+        )
+    db.delete(d)
+    db.commit()
+    return {"status": "deleted"}
+
+
+@router.post("/invite")
+def invite_user(payload: dict, db: Session = Depends(get_db), current=Depends(get_current_user)):
+    _assert_admin_or_superadmin(current)
+    role = (payload.get("role") or "").strip().lower()
+    if role not in ("patient", "doctor"):
+        raise HTTPException(status_code=400, detail="role must be patient or doctor")
+    email = (payload.get("email") or "").strip().lower()
+    name = (payload.get("name") or "").strip() or None
+    phone = (payload.get("phone") or "").strip() or None
+    age = payload.get("age")
+    if not email:
+        raise HTTPException(status_code=400, detail="email is required")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="email already registered")
+
+    temporary_password = secrets.token_urlsafe(10)
+    user = User(
+        email=email,
+        password=generate_password_hash(temporary_password),
+        role=role,
+        name=name,
+        phone=phone,
+        age=age if role == "patient" else None,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {
+        "message": f"{role.capitalize()} invited successfully",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+            "phone": user.phone,
+            "age": user.age,
+        },
+        "temporary_password": temporary_password,
+    }
 
 
 @router.get("/{patient_id}")

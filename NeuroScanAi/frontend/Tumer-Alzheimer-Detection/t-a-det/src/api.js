@@ -33,6 +33,70 @@ export function authHeaders() {
   return headers;
 }
 
+/** For binary GETs (PDF, images): avoid forcing JSON Content-Type on the request. */
+export function authBearerHeaders() {
+  const token = localStorage.getItem("token");
+  const headers = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
+/**
+ * URL to open a stored report PDF in the browser (inline) or download (?download=true).
+ * Uses access_token query so window.open works without Authorization header.
+ */
+export function reportPdfOpenUrl(reportId, { download = false } = {}) {
+  const id = Number(reportId);
+  if (!id) return null;
+  const token = localStorage.getItem("token") || "";
+  const q = new URLSearchParams();
+  if (download) q.set("download", "true");
+  if (token) q.set("access_token", token);
+  const qs = q.toString();
+  return `${BASE_URL}/reports/${id}${qs ? `?${qs}` : ""}`;
+}
+
+/** List PDF reports for the logged-in doctor or patient (GET /reports). */
+export async function listReports() {
+  const res = await fetch(`${BASE_URL}/reports`, { headers: authHeaders() });
+  if (!res.ok) {
+    let msg = "Failed to load reports";
+    try {
+      const body = await res.json();
+      msg = parseFastApiDetail(body) || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+/**
+ * Load a report PDF from a path or absolute URL (e.g. /uploads/reports/...).
+ * Forces application/pdf so browsers render it inline in iframes/embeds reliably.
+ */
+export async function fetchReportPdfBlob(relativeOrAbsoluteUrl) {
+  const url = absoluteUrl(relativeOrAbsoluteUrl);
+  if (!url) throw new Error("No report URL");
+  const res = await fetch(url, { headers: authBearerHeaders() });
+  if (!res.ok) throw new Error("Failed to load report PDF");
+  const buf = await res.arrayBuffer();
+  return new Blob([buf], { type: "application/pdf" });
+}
+
+/**
+ * Load report PDF via API (no ``.pdf`` in URL path) so download managers do not grab View/preview requests.
+ */
+export async function fetchReportPdfBlobByReportId(reportId) {
+  const id = Number(reportId);
+  if (!id) throw new Error("Invalid report id");
+  const res = await fetch(`${BASE_URL}/reports/${id}`, { headers: authBearerHeaders() });
+  if (!res.ok) throw new Error("Failed to load report PDF");
+  const buf = await res.arrayBuffer();
+  return new Blob([buf], { type: "application/pdf" });
+}
+
 export function logout() {
   localStorage.removeItem("token");
 }
@@ -97,6 +161,35 @@ export async function listDoctors() {
   return res.json();
 }
 
+export async function createDoctor(payload) {
+  const res = await fetch(`${BASE_URL}/api/patients/doctors`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error((await res.json()).detail || "Failed to create doctor");
+  return res.json();
+}
+
+export async function deleteDoctor(doctorId) {
+  const res = await fetch(`${BASE_URL}/api/patients/doctors/${doctorId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error((await res.json()).detail || "Failed to delete doctor");
+  return res.json();
+}
+
+export async function inviteUser(payload) {
+  const res = await fetch(`${BASE_URL}/api/patients/invite`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error((await res.json()).detail || "Failed to invite user");
+  return res.json();
+}
+
 export async function createPatient(payload) {
   const res = await fetch(`${BASE_URL}/api/patients/`, {
     method: "POST",
@@ -146,6 +239,52 @@ export async function runAnalysis(scanId) {
   });
   if (!res.ok) {
     let msg = "Failed to run analysis";
+    try {
+      const body = await res.json();
+      msg = parseFastApiDetail(body) || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+/**
+ * Generates PDF on server; response is JSON (not PDF) so download tools do not grab the POST.
+ * @param {{ scan_id: number, patient_id: number, patient_name?: string|null, age?: number|null, gender?: string|null }} payload
+ * @returns {Promise<{ reportId: string|number|null, message: string|null }>}
+ */
+export async function generateSegmentationReport(payload) {
+  const res = await fetch(`${BASE_URL}/api/generate-report`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let msg = "Failed to generate report";
+    try {
+      const body = await res.json();
+      msg = parseFastApiDetail(body) || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  const reportId = data.report_id != null ? data.report_id : null;
+  const message = data.message != null ? data.message : null;
+  return { reportId, message };
+}
+
+export async function sendReportToPatient(reportId, patientId) {
+  const res = await fetch(`${BASE_URL}/api/send-report`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ report_id: Number(reportId), patient_id: Number(patientId) }),
+  });
+  if (!res.ok) {
+    let msg = "Failed to send report";
     try {
       const body = await res.json();
       msg = parseFastApiDetail(body) || msg;
@@ -265,6 +404,32 @@ export async function uploadMRI(filesByModality, doctorId = null) {
   });
   if (!res.ok) {
     let detail = "MRI upload failed";
+    try {
+      const body = await res.json();
+      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail) || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+/** Patient accounts: single ZIP with t1c/t1n/t2f/t2w (.nii or .nii.gz) anywhere in the archive. */
+export async function uploadPatientMriZip(zipFile, doctorId) {
+  const formData = new FormData();
+  formData.append("mri_zip", zipFile);
+  const idNum = doctorId != null && doctorId !== "" ? Number(doctorId) : NaN;
+  if (Number.isFinite(idNum) && idNum > 0) {
+    formData.append("doctor_id", String(idNum));
+  }
+  const res = await fetch(`${BASE_URL}/mri/upload`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+    body: formData,
+  });
+  if (!res.ok) {
+    let detail = "MRI ZIP upload failed";
     try {
       const body = await res.json();
       detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail) || detail;
