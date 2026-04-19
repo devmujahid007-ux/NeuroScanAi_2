@@ -136,5 +136,9 @@ def get_report_pdf(
 
     fname = os.path.basename(path) or f"report_{report_id}.pdf"
     disp = f'attachment; filename="{fname}"' if download else "inline"
-    headers = {"Content-Disposition": disp}
+    headers = {
+        "Content-Disposition": disp,
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
     return FileResponse(path, media_type="application/pdf", headers=headers)

@@ -39,13 +39,23 @@
     <tr><td class="k">Scan folder</td><td>{{ scan_folder_label }}</td></tr>
   </table>
 
+  <h2>Model results (this report run)</h2>
+  <p class="muted">Values below are produced by the server segmentation pass that built this PDF (not a cached prior report).</p>
+  <table class="meta">
+    <tr><td class="k">Prediction</td><td><strong>{{ prediction_label }}</strong></td></tr>
+    <tr><td class="k">Mean class confidence</td><td>{% if confidence_score == 'N/A' %}N/A{% else %}{{ confidence_score }}%{% endif %}</td></tr>
+    <tr><td class="k">Positive tumor voxels (mask)</td><td>{{ tumor_positive_voxels }}</td></tr>
+    <tr><td class="k">Estimated tumor volume</td><td>{{ tumor_volume_cm3 }} cm³ ({{ tumor_volume_mm3 }} mm³)</td></tr>
+    <tr><td class="k">Report generated (UTC)</td><td>{{ generated_at }}</td></tr>
+  </table>
+
   <h2>Findings</h2>
   <div class="box">
     <p>{{ findings_paragraph }}</p>
     <p><strong>Estimated tumor volume:</strong> {{ tumor_volume_cm3 }} cm³ ({{ tumor_volume_mm3 }} mm³).</p>
     <p><strong>Model-predicted location (axial centroid):</strong> {{ tumor_location }}.</p>
     <p><strong>Severity category (volume-based):</strong> {{ severity }}.</p>
-    <p><strong>Mean class confidence (model internal):</strong> {{ confidence_score }}%.</p>
+    <p><strong>Mean class confidence (model internal):</strong> {% if confidence_score == 'N/A' %}N/A{% else %}{{ confidence_score }}%{% endif %}.</p>
   </div>
 
   <h2>AI analysis</h2>

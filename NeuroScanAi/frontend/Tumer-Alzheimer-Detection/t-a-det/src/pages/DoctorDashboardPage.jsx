@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import LogoutButton from "../components/LogoutButton";
 import {
   MRI_MODALITIES,
@@ -13,7 +14,100 @@ import {
   predictTumorSegmentation,
   reportPdfOpenUrl,
   sendReportToPatient,
+  viewModelResult,
 } from "../api";
+
+function DoctorReportHistoryBlock({
+  reportList,
+  openReportPdfDownload,
+  sendSegReportToPatient,
+  sendingReports,
+  showViewResultLink = false,
+}) {
+  return (
+    <div className="mt-6 rounded-xl border border-slate-200 bg-white p-4 md:p-6 shadow-sm">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+        <h3 className="text-lg font-semibold text-slate-900">Report history</h3>
+        <span className="text-xs text-slate-500">{reportList.length} saved on server</span>
+      </div>
+      <p className="text-sm text-slate-600 mb-4">
+        PDFs are stored under <span className="font-mono text-xs">/reports</span> on the server and listed via{" "}
+        <span className="font-mono text-xs">GET /reports</span>. <strong>Download</strong> saves the file. Use{" "}
+        <strong>Send to patient</strong> when a report should appear on the patient dashboard.
+      </p>
+      {reportList.length === 0 ? (
+        <p className="text-sm text-slate-500 bg-slate-50 rounded-lg px-3 py-4 border border-slate-100">
+          No reports yet. Run <strong>Analyze stored scan</strong>, then <strong>Generate report</strong> — the PDF opens in a new tab and appears here.
+        </p>
+      ) : (
+        <ul className="space-y-3">
+          {reportList.map((row) => {
+            const sentToPatient = Boolean(row.sent_to_patient);
+            const patientName = row.patient_name || `Patient #${row.patient_id}`;
+            const dateLabel = row.created_at ? new Date(row.created_at).toLocaleString() : "—";
+            return (
+              <li
+                key={row.id}
+                className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/80 px-4 py-3"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-slate-900">{patientName}</div>
+                  <div className="text-xs text-slate-500 mt-0.5">
+                    Report #{row.id} · Scan #{row.scan_id} · {dateLabel}
+                  </div>
+                  <div className="mt-2">
+                    {sentToPatient ? (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        Sent to patient
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-900">
+                        Not sent yet
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {showViewResultLink ? (
+                    <Link
+                      to={`/results/${row.id}`}
+                      className="px-3 py-2 rounded-lg border border-blue-600 text-blue-600 text-sm font-medium hover:bg-blue-50 text-center"
+                    >
+                      View result summary
+                    </Link>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => openReportPdfDownload(row.id)}
+                    className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 text-sm font-medium hover:bg-slate-50"
+                  >
+                    Download
+                  </button>
+                  {!sentToPatient ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        sendSegReportToPatient({
+                          reportId: row.id,
+                          patientId: row.patient_id,
+                          scanId: row.scan_id,
+                        })
+                      }
+                      disabled={sendingReports.has(row.scan_id)}
+                      className="px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {sendingReports.has(row.scan_id) ? "Sending…" : "Send to patient"}
+                    </button>
+                  ) : null}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 const StatCard = ({ title, value, subtitle, icon }) => (
   <div className="bg-white rounded-2xl shadow-sm p-4 flex items-start gap-4">
@@ -189,6 +283,8 @@ function isValidMRIFile(file) {
 
 export default function DoctorDashboardPage() {
   const [requests, setRequests] = useState([]);
+  /** @type {['tumor','alzheimer']} */
+  const [doctorModule, setDoctorModule] = useState("tumor");
   const [currentDoctor, setCurrentDoctor] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -199,10 +295,20 @@ export default function DoctorDashboardPage() {
   const [uploadNotice, setUploadNotice] = useState(null);
   const [mriViewer, setMriViewer] = useState(null);
   const [workflowScanId, setWorkflowScanId] = useState("");
+  /** Scan id that has completed `viewModelResult` (stored pipeline); required before PDF. */
+  const [pdfUnlockedScanId, setPdfUnlockedScanId] = useState(null);
   const [modelView, setModelView] = useState(null);
   const [resultImageTs, setResultImageTs] = useState(0);
   const [viewBusy, setViewBusy] = useState(false);
+  /** Which tumor inference is running: server scan vs local four-file /predict */
+  const [inferenceBusyKind, setInferenceBusyKind] = useState(null);
   const [reportList, setReportList] = useState([]);
+
+  /** All four BraTS modalities chosen on disk — enables live ``/predict`` (View result) vs server pipeline. */
+  const tumorFourModalityReady = useMemo(
+    () => doctorModule === "tumor" && MRI_MODALITIES.every((m) => Boolean(uploadFiles[m])),
+    [doctorModule, uploadFiles]
+  );
 
   const openReportPdfDownload = useCallback((reportId) => {
     const id = Number(reportId);
@@ -272,24 +378,34 @@ export default function DoctorDashboardPage() {
 
   const closeMriViewer = useCallback(() => setMriViewer(null), []);
 
+  const isTumorReq = (r) => !r.scan_kind || r.scan_kind === "mri";
+  const isAlzReq = (r) => r.scan_kind === "alzheimer";
+  const moduleRequests = requests.filter(doctorModule === "tumor" ? isTumorReq : isAlzReq);
+
   /** Scans that can use the report workflow (stays visible after status moves to analyzed) */
-  const workflowScans = requests.filter((r) => r.status === "sent" || r.status === "analyzed");
+  const workflowScans = moduleRequests.filter((r) => r.status === "sent" || r.status === "analyzed");
   const openRequestsCount = workflowScans.length;
   const reportsSentCount = reportList.filter((report) => Boolean(report.sent_to_patient)).length;
-  const totalCasesCount = requests.length;
+  const totalCasesCount = moduleRequests.length;
 
   useEffect(() => {
     if (workflowScans.length === 0) {
       if (workflowScanId) setWorkflowScanId("");
+      setPdfUnlockedScanId(null);
+      setModelView(null);
       return;
     }
     const stillExists = workflowScans.some((scan) => String(scan.id) === workflowScanId);
     if (!workflowScanId || !stillExists) {
       setWorkflowScanId(String(workflowScans[0].id));
+      setPdfUnlockedScanId(null);
+      setModelView(null);
     }
   }, [workflowScans, workflowScanId]);
 
   const selectedWorkflowScan = requests.find((r) => String(r.id) === workflowScanId);
+  /** Tumor full result page (`/results/:id`) — matches saved report for the selected scan when present. */
+  const reportIdForWorkflowScan = reportList.find((r) => Number(r.scan_id) === Number(workflowScanId))?.id;
 
   const handleDownloadMri = async () => {
     if (!workflowScanId) {
@@ -312,11 +428,55 @@ export default function DoctorDashboardPage() {
     }
   };
 
-  const handlePredict = async () => {
+  const handleAnalyzeStored = async () => {
+    if (!workflowScanId) {
+      setError("Select a patient scan first.");
+      return;
+    }
+    const id = Number(workflowScanId);
+    if (!Number.isFinite(id)) {
+      setError("Invalid scan selection.");
+      return;
+    }
     setViewBusy(true);
+    setInferenceBusyKind("stored");
     setError(null);
     setUploadNotice(null);
-       setModelView(null);
+    setModelView(null);
+    setPdfUnlockedScanId(null);
+    try {
+      const data = await viewModelResult(id);
+      setModelView({
+        prediction: data?.prediction || "Analysis completed",
+        confidence: data?.confidence ?? null,
+        probs: data?.probs || null,
+        probsAreVoxelCounts: true,
+        tumor_volume: data?.tumor_volume || null,
+        output_image_url: data?.output_image_url || null,
+        model_version: data?.model_version || null,
+        preview_run_at: data?.preview_run_at || null,
+        source: data?.source || "stored_scan",
+      });
+      setPdfUnlockedScanId(id);
+      setResultImageTs(Date.now());
+    } catch (err) {
+      setError(err.message || "Stored-scan analysis failed");
+      setModelView(null);
+      setPdfUnlockedScanId(null);
+    } finally {
+      setViewBusy(false);
+      setInferenceBusyKind(null);
+    }
+  };
+
+  /** Live BraTS segmentation on the four uploaded NIfTI files via ``POST /predict`` (same model as clinic pipeline). */
+  const handleViewResultLocal = async () => {
+    setViewBusy(true);
+    setInferenceBusyKind("local");
+    setError(null);
+    setUploadNotice(null);
+    setModelView(null);
+    setPdfUnlockedScanId(null);
 
     const t1c = uploadFiles.t1c;
     const t1n = uploadFiles.t1n;
@@ -325,43 +485,44 @@ export default function DoctorDashboardPage() {
 
     try {
       if (!t1c || !t1n || !t2f || !t2w) {
-        setError("Please upload all 4 MRI scans (uses the same tumor segmentation model as /predict).");
+        setError("Select all four modalities (t1c, t1n, t2f, t2w) to run the segmentation model.");
         return;
       }
 
       const data = await predictTumorSegmentation({ t1c, t1n, t2f, t2w });
       setModelView({
-        prediction: data?.message || "Prediction completed",
+        prediction: data?.message || "Analysis completed",
         confidence: data?.confidence ?? null,
         probs: data?.probs || null,
+        probsAreVoxelCounts: true,
         tumor_volume: data?.tumor_volume || null,
         output_image_url: data?.output_image || data?.output_image_url || null,
         model_version: data?.model_version || null,
+        source: "live_segmentation",
       });
       setResultImageTs(Date.now());
-      setUploadFiles({ t1c: null, t1n: null, t2f: null, t2w: null });
-      for (const modality of MRI_MODALITIES) {
-        const input = document.getElementById(`doctor-mri-input-${modality}`);
-        if (input) input.value = "";
-      }
+      setUploadNotice(
+        "Segmentation finished using the uploaded volumes. Files are kept so you can run View result again. Clear a modality to use Analyze stored scan on the server copy."
+      );
     } catch (err) {
-      setError(err.message || "Failed to connect to backend");
+      setError(err.message || "Segmentation request failed");
       setModelView(null);
     } finally {
       setViewBusy(false);
+      setInferenceBusyKind(null);
     }
   };
 
   const handleGenerateReport = async () => {
-    if (!modelView) {
-      setError("Run View result (/predict) successfully first, then generate the report.");
-      return;
-    }
     if (!workflowScanId) {
       setError("Select which patient scan you are working on.");
       return;
     }
     const id = Number(workflowScanId);
+    if (pdfUnlockedScanId !== id) {
+      setError("Run Analyze stored scan for this request first — the PDF uses the server copy of the patient MRI, not local /predict files.");
+      return;
+    }
     const req = selectedWorkflowScan;
     if (!req?.patient_id) {
       setError("Could not resolve patient for this scan.");
@@ -390,6 +551,8 @@ export default function DoctorDashboardPage() {
       setUploadNotice(
         "Report generated successfully and saved on the server. The PDF opened in a new tab — use Reports below to view, download, or send to the patient."
       );
+      setPdfUnlockedScanId(null);
+      setModelView(null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -422,7 +585,8 @@ export default function DoctorDashboardPage() {
         <div>
           <h1 className="text-2xl md:text-3xl font-semibold text-slate-800">Doctor Dashboard</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Download patient MRIs if needed, re-upload modalities, run the model, generate a PDF report (saved automatically), then send it to the patient from Reports.
+            Tumor: add four BraTS modalities below for <strong>View result</strong> (live model), or use{" "}
+            <strong>Analyze stored scan</strong> on the server copy for PDF workflow. Alzheimer: stored PNG/JPEG only.
           </p>
           {currentDoctor && (
             <p className="text-xs text-slate-400 mt-1">
@@ -481,9 +645,74 @@ export default function DoctorDashboardPage() {
         </div>
       )}
 
+      <div className="flex flex-wrap gap-3 mb-6">
+        <button
+          type="button"
+          onClick={() => setDoctorModule("tumor")}
+          className={`px-5 py-2.5 rounded-xl font-semibold border transition ${
+            doctorModule === "tumor"
+              ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+              : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+          }`}
+        >
+          Tumor requests
+        </button>
+        <button
+          type="button"
+          onClick={() => setDoctorModule("alzheimer")}
+          className={`px-5 py-2.5 rounded-xl font-semibold border transition ${
+            doctorModule === "alzheimer"
+              ? "bg-indigo-600 text-white border-indigo-600 shadow-sm"
+              : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+          }`}
+        >
+          Alzheimer requests
+        </button>
+      </div>
+
+      <section className="bg-white rounded-2xl shadow-sm p-6 mb-6 border border-slate-200">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold text-slate-900">
+            {doctorModule === "tumor" ? "Tumor queue" : "Alzheimer queue"}
+          </h3>
+          <span className="text-sm text-slate-500">{moduleRequests.length} assigned</span>
+        </div>
+        {moduleRequests.length === 0 ? (
+          <p className="text-sm text-slate-600">No {doctorModule === "tumor" ? "tumor" : "Alzheimer"} requests yet.</p>
+        ) : (
+          <ul className="space-y-3">
+            {moduleRequests.map((r) => (
+              <li
+                key={r.id}
+                className="flex flex-col sm:flex-row sm:items-center gap-3 rounded-xl border border-slate-200 bg-slate-50/80 p-4"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-mono text-slate-500">Scan #{r.id}</div>
+                  <div className="text-sm font-medium text-slate-900 truncate">{r.patient?.email || "Patient"}</div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    Status: {r.status} · {r.file_name || "file"}
+                  </div>
+                </div>
+                {doctorModule === "alzheimer" && r.file_url ? (
+                  <div className="shrink-0">
+                    <img
+                      src={absoluteUrl(r.file_url)}
+                      alt={`Scan ${r.id}`}
+                      className="h-20 w-auto max-w-[140px] rounded-lg border border-slate-200 object-cover bg-black"
+                    />
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       {showUploadSection && (
         <section className="bg-white rounded-2xl shadow-sm p-6 mb-6 border border-slate-200 ring-1 ring-slate-100">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4">MRI — view model output &amp; report</h2>
+          <h2 className="text-lg font-semibold text-slate-900 mb-4">
+            {doctorModule === "tumor" ? "MRI — view model output & report" : "Alzheimer — view model output & report"}
+          </h2>
 
           <div className="grid gap-4 md:grid-cols-3 mb-5">
             <div>
@@ -493,6 +722,7 @@ export default function DoctorDashboardPage() {
                 onChange={(e) => {
                   setWorkflowScanId(e.target.value);
                   setModelView(null);
+                  setPdfUnlockedScanId(null);
                 }}
                 className="w-full px-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
               >
@@ -519,13 +749,16 @@ export default function DoctorDashboardPage() {
             </div>
           </div>
 
+          {doctorModule === "tumor" ? (
           <div
             className="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center hover:border-blue-400 transition-colors bg-slate-50/50"
           >
-            <p className="text-sm font-medium text-slate-700 mb-1">Re-upload MRI from this PC (optional)</p>
+            <p className="text-sm font-medium text-slate-700 mb-1">Four BraTS modalities (clinical segmentation)</p>
             <p className="text-xs text-slate-500 mb-3">
-              DICOM (<span className="font-mono">.dcm</span>, <span className="font-mono">.dicom</span>) or NIfTI (<span className="font-mono">.nii</span>, <span className="font-mono">.nii.gz</span>).
-              <strong> View result</strong> runs the legacy <span className="font-mono">/predict</span> tumor segmentation pipeline on these four files (not the BraTS server scan path).
+              NIfTI (<span className="font-mono">.nii</span>, <span className="font-mono">.nii.gz</span>) per modality. When all four are selected, use{" "}
+              <strong>View result</strong> to run the same 3D BraTS SegResNet used by <span className="font-mono">/predict</span> on these files. PDF
+              generation still uses the patient&apos;s <strong>server-stored</strong> scan — clear a file or use{" "}
+              <strong>Analyze stored scan</strong> for that path.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-left">
               {MRI_MODALITIES.map((modality) => (
@@ -567,43 +800,96 @@ export default function DoctorDashboardPage() {
               ))}
             </div>
           </div>
+          ) : (
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-4 text-sm text-indigo-950">
+              Alzheimer cases use the <strong>patient&apos;s uploaded PNG/JPEG</strong> on the server. Use{" "}
+              <strong>Analyze stored scan</strong> to run the Alzheimer model — no BraTS modalities or ZIP staging here.
+            </div>
+          )}
 
-          <div className="mt-5 flex flex-col sm:flex-row flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={handlePredict}
-              disabled={viewBusy || MRI_MODALITIES.some((m) => !uploadFiles[m])}
-              className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-            >
-              {viewBusy ? "Running model…" : "View result (/predict)"}
-            </button>
-            <button
-              type="button"
-              onClick={handleGenerateReport}
-              title={
-                !modelView && workflowScanId && workflowScans.length > 0
-                  ? "Run View result (/predict) successfully first"
-                  : undefined
-              }
-              disabled={
-                !workflowScanId ||
-                workflowScans.length === 0 ||
-                !modelView ||
-                analyzingScans.has(Number(workflowScanId))
-              }
-              className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-            >
-              {analyzingScans.has(Number(workflowScanId)) ? "Generating…" : "Generate report (PDF)"}
-            </button>
-          </div>
-          {!modelView && workflowScanId && workflowScans.length > 0 ? (
-            <p className="text-xs text-amber-800 mt-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-              Upload all four MRI files and click <strong>View result</strong> before <strong>Generate report</strong> is available.
+          <div className="mt-5 flex flex-col gap-3">
+            {doctorModule === "tumor" && tumorFourModalityReady ? (
+              <p className="text-xs text-emerald-900 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                All four modalities are selected. Use <strong>View result</strong> for live segmentation on these files.{" "}
+                <strong>Analyze stored scan</strong> is disabled until you clear at least one file (it runs on the
+                server-side patient volume).
+              </p>
+            ) : null}
+            {doctorModule === "tumor" && !tumorFourModalityReady ? (
+              <p className="text-xs text-slate-600">
+                Choose all four NIfTI modalities above to enable <strong>View result</strong> (production BraTS model on your
+                uploads).
+              </p>
+            ) : null}
+            <div className="flex flex-col sm:flex-row flex-wrap gap-3">
+              {doctorModule === "tumor" ? (
+                <button
+                  type="button"
+                  onClick={handleViewResultLocal}
+                  disabled={viewBusy || !tumorFourModalityReady}
+                  className="flex-1 min-w-[180px] px-4 py-3 rounded-xl bg-emerald-600 text-white font-semibold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                >
+                  {viewBusy && inferenceBusyKind === "local" ? "Running model…" : "View result"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={handleAnalyzeStored}
+                disabled={
+                  viewBusy ||
+                  !workflowScanId ||
+                  workflowScans.length === 0 ||
+                  (doctorModule === "tumor" && tumorFourModalityReady)
+                }
+                title={
+                  doctorModule === "tumor" && tumorFourModalityReady
+                    ? "Clear at least one local modality file to analyze the server-stored scan."
+                    : undefined
+                }
+                className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              >
+                {viewBusy && inferenceBusyKind === "stored" ? "Running model…" : "Analyze stored scan"}
+              </button>
+              <button
+                type="button"
+                onClick={handleGenerateReport}
+                title={
+                  workflowScanId &&
+                  workflowScans.length > 0 &&
+                  pdfUnlockedScanId !== Number(workflowScanId)
+                    ? "Run Analyze stored scan successfully first"
+                    : undefined
+                }
+                disabled={
+                  !workflowScanId ||
+                  workflowScans.length === 0 ||
+                  pdfUnlockedScanId !== Number(workflowScanId) ||
+                  analyzingScans.has(Number(workflowScanId))
+                }
+                className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              >
+                {analyzingScans.has(Number(workflowScanId)) ? "Generating…" : "Generate report (PDF)"}
+              </button>
+            </div>
+            <p className="text-xs text-slate-600">
+              The PDF uses the patient MRI stored on the server. After each successful PDF, run <strong>Analyze stored scan</strong> again before the next report.
             </p>
-          ) : null}
+            {workflowScanId && workflowScans.length > 0 && pdfUnlockedScanId !== Number(workflowScanId) ? (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                <strong>Generate report</strong> stays locked until <strong>Analyze stored scan</strong> finishes for this scan.
+              </p>
+            ) : null}
+          </div>
 
           {modelView && (
             <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4 md:p-6">
+              {modelView.source === "live_segmentation" ? (
+                <p className="text-xs text-slate-800 bg-white border border-slate-200 rounded-lg px-3 py-2 mb-4">
+                  <strong>Live model output</strong> — 3D BraTS SegResNet via <span className="font-mono">POST /predict</span> on
+                  your four uploads (not a mock). Patient PDFs still require the server-stored scan: clear a local file, then
+                  run <strong>Analyze stored scan</strong> and <strong>Generate report (PDF)</strong>.
+                </p>
+              ) : null}
               <div className="flex flex-col lg:flex-row gap-6">
                 <div className="flex-1 rounded-lg overflow-hidden border border-slate-200 bg-black shadow-inner">
                   <img
@@ -625,104 +911,67 @@ export default function DoctorDashboardPage() {
                     {modelView.model_version && (
                       <div className="text-xs text-slate-500 font-sans pt-1">{modelView.model_version}</div>
                     )}
-                    {modelView.tumor_volume && (
+                    {modelView.tumor_volume ? (
                       <div>
                         <span className="text-slate-500 font-sans text-xs uppercase tracking-wide">Tumor volume (voxel proxy)</span>
                         <div>{modelView.tumor_volume}</div>
                       </div>
-                    )}
+                    ) : null}
                   </div>
                   {modelView.probs && (
                     <div className="bg-white rounded-lg p-4 border border-slate-200 font-mono text-sm">
+                      <div className="text-xs text-slate-500 font-sans mb-2">
+                        {modelView.probsAreVoxelCounts ? "Label id → voxel count (segmentation mask)" : "Class → estimated %"}
+                      </div>
                       {Object.entries(modelView.probs).map(([k, v]) => (
                         <div key={k} className="flex justify-between gap-4 py-1 border-b border-slate-100 last:border-0">
                           <span className="text-slate-700">{k}</span>
-                          <span>{v}%</span>
+                          <span>
+                            {modelView.probsAreVoxelCounts
+                              ? Number(v).toLocaleString()
+                              : `${v}%`}
+                          </span>
                         </div>
                       ))}
                     </div>
                   )}
+                  {doctorModule === "tumor" && modelView.source === "stored_scan" && reportIdForWorkflowScan ? (
+                    <div className="pt-2">
+                      <Link
+                        to={`/results/${reportIdForWorkflowScan}`}
+                        className="inline-flex px-4 py-2 rounded-lg border border-blue-600 text-blue-600 font-medium hover:bg-blue-50 text-sm"
+                      >
+                        View result summary
+                      </Link>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>
           )}
 
-                   <div className="mt-6 rounded-xl border border-slate-200 bg-white p-4 md:p-6 shadow-sm">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
-              <h3 className="text-lg font-semibold text-slate-900">Report history</h3>
-              <span className="text-xs text-slate-500">{reportList.length} saved on server</span>
-            </div>
-            <p className="text-sm text-slate-600 mb-4">
-              PDFs are stored under <span className="font-mono text-xs">/reports</span> on the server and listed via{" "}
-              <span className="font-mono text-xs">GET /reports</span>. <strong>Download</strong> saves the file. Use{" "}
-              <strong>Send to patient</strong> when a report should appear on the patient dashboard.
-            </p>
-            {reportList.length === 0 ? (
-              <p className="text-sm text-slate-500 bg-slate-50 rounded-lg px-3 py-4 border border-slate-100">
-                No reports yet. Run <strong>View result</strong>, then <strong>Generate report</strong> — the PDF opens in a new tab and appears here.
-              </p>
-            ) : (
-              <ul className="space-y-3">
-                {reportList.map((row) => {
-                  const sentToPatient = Boolean(row.sent_to_patient);
-                  const patientName = row.patient_name || `Patient #${row.patient_id}`;
-                  const dateLabel = row.created_at ? new Date(row.created_at).toLocaleString() : "—";
-                  return (
-                    <li
-                      key={row.id}
-                      className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/80 px-4 py-3"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-sm font-semibold text-slate-900">{patientName}</div>
-                        <div className="text-xs text-slate-500 mt-0.5">
-                          Report #{row.id} · Scan #{row.scan_id} · {dateLabel}
-                        </div>
-                        <div className="mt-2">
-                          {sentToPatient ? (
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                              Sent to patient
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-900">
-                              Not sent yet
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => openReportPdfDownload(row.id)}
-                          className="px-3 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 text-sm font-medium hover:bg-slate-50"
-                        >
-                          Download
-                        </button>
-                        {!sentToPatient ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              sendSegReportToPatient({
-                                reportId: row.id,
-                                patientId: row.patient_id,
-                                scanId: row.scan_id,
-                              })
-                            }
-                            disabled={sendingReports.has(row.scan_id)}
-                            className="px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {sendingReports.has(row.scan_id) ? "Sending…" : "Send to patient"}
-                          </button>
-                        ) : null}
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
+          <DoctorReportHistoryBlock
+            reportList={reportList}
+            openReportPdfDownload={openReportPdfDownload}
+            sendSegReportToPatient={sendSegReportToPatient}
+            sendingReports={sendingReports}
+            showViewResultLink={doctorModule === "tumor"}
+          />
 
           {uploadNotice && <p className="mt-4 text-sm text-slate-600">{uploadNotice}</p>}
 
+        </section>
+      )}
+
+      {!showUploadSection && (
+        <section className="bg-white rounded-2xl shadow-sm p-6 mb-6 border border-slate-200">
+          <DoctorReportHistoryBlock
+            reportList={reportList}
+            openReportPdfDownload={openReportPdfDownload}
+            sendSegReportToPatient={sendSegReportToPatient}
+            sendingReports={sendingReports}
+            showViewResultLink={doctorModule === "tumor"}
+          />
         </section>
       )}
 

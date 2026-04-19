@@ -8,6 +8,7 @@ import subprocess
 import time
 import sys
 import os
+import shlex
 from pathlib import Path
 
 def kill_process_on_port(port):
@@ -29,7 +30,7 @@ def kill_process_on_port(port):
                         try:
                             subprocess.run(["taskkill", "/PID", pid, "/F"], 
                                          capture_output=True, timeout=5)
-                            print(f"✓ Killed process {pid} on port {port}")
+                            print(f"[OK] Killed process {pid} on port {port}")
                         except:
                             pass
         else:
@@ -46,7 +47,7 @@ def kill_process_on_port(port):
                     for pid in pids:
                         subprocess.run(["kill", "-9", pid], 
                                      capture_output=True, timeout=5)
-                        print(f"✓ Killed process {pid} on port {port}")
+                        print(f"[OK] Killed process {pid} on port {port}")
             except:
                 pass
     except:
@@ -70,16 +71,16 @@ def main():
     print("[1] Checking prerequisites...")
     
     if not (backend_dir / "venv").exists():
-        print("❌ ERROR: Backend virtual environment not found")
+        print("[ERROR] Backend virtual environment not found")
         print("   Run: python start.py --setup")
         return 1
     
     if not (frontend_dir / "node_modules").exists():
-        print("❌ ERROR: Frontend node_modules not found")
+        print("[ERROR] Frontend node_modules not found")
         print("   Run: python start.py --setup")
         return 1
     
-    print("✓ All prerequisites found")
+    print("[OK] All prerequisites found")
     print()
     
     # Kill any existing processes on the ports
@@ -87,30 +88,52 @@ def main():
     kill_process_on_port(8000)
     kill_process_on_port(3000)
     time.sleep(1)
-    print("✓ Ports cleared")
+    print("[OK] Ports cleared")
     print()
     
     # Start backend
     print("[2] Starting Backend on http://localhost:8000...")
     if sys.platform == "win32":
         backend_python = backend_dir / "venv" / "Scripts" / "python.exe"
-        backend_cmd = f'cd /d "{backend_dir}" && "{backend_python}" -m uvicorn main:app --reload --port 8000'
-        backend_process = subprocess.Popen(backend_cmd, shell=True)
-    else:
         backend_process = subprocess.Popen(
-            ["source", "venv/bin/activate", "&&", "python", "-m", "uvicorn", "app.main:app", "--reload", "--port", "8000"],
-            cwd=str(backend_dir)
+            [
+                str(backend_python),
+                "-m",
+                "uvicorn",
+                "main:app",
+                "--reload",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8000",
+            ],
+            cwd=str(backend_dir),
+        )
+    else:
+        quoted = shlex.quote(str(backend_dir.resolve()))
+        backend_process = subprocess.Popen(
+            [
+                "bash",
+                "-lc",
+                f"cd {quoted} && source venv/bin/activate && "
+                "python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000",
+            ],
+            cwd=str(backend_dir),
         )
     
     time.sleep(3)
-    print("✓ Backend started")
+    print("[OK] Backend started")
     print()
     
     # Start frontend
     print("[3] Starting Frontend on http://localhost:3000...")
     if sys.platform == "win32":
-        frontend_cmd = f'cd /d "{frontend_dir}" && set PORT=3000 && npm start'
-        frontend_process = subprocess.Popen(frontend_cmd, shell=True)
+        react_scripts = frontend_dir / "node_modules" / "react-scripts" / "bin" / "react-scripts.js"
+        frontend_process = subprocess.Popen(
+            ["node", str(react_scripts), "start"],
+            cwd=str(frontend_dir),
+            env={**os.environ, "PORT": "3000"}
+        )
     else:
         frontend_process = subprocess.Popen(
             ["npm", "start"],
@@ -118,11 +141,11 @@ def main():
             env={**os.environ, "PORT": "3000"}
         )
     
-    print("✓ Frontend started")
+    print("[OK] Frontend started")
     print()
     
     print("=" * 70)
-    print("✓ Both services are running CONCURRENTLY!")
+    print("[OK] Both services are running CONCURRENTLY!")
     print()
     print("  Frontend: http://localhost:3000")
     print("  Backend:  http://localhost:8000")
@@ -140,7 +163,7 @@ def main():
         frontend_process.terminate()
         backend_process.wait(timeout=5)
         frontend_process.wait(timeout=5)
-        print("✓ All services stopped")
+        print("[OK] All services stopped")
         return 0
 
 if __name__ == "__main__":
@@ -150,6 +173,6 @@ if __name__ == "__main__":
             os.system(f'cd /d "{Path(__file__).parent}" && cmd /c "cd backend && python -m venv venv && venv\\Scripts\\activate && pip install -r requirements.txt && cd .. && cd frontend\\Tumer-Alzheimer-Detection\\t-a-det && npm install"')
         else:
             os.system(f'cd "{Path(__file__).parent}" && cd backend && python -m venv venv && source venv/bin/activate && pip install -r requirements.txt && cd ../frontend/Tumer-Alzheimer-Detection/t-a-det && npm install')
-        print("✓ Setup complete! Now run: python start.py")
+        print("[OK] Setup complete! Now run: python start.py")
     else:
         sys.exit(main())

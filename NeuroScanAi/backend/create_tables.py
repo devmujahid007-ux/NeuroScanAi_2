@@ -1,4 +1,4 @@
-from app.database.db import Base, engine
+from app.database.db import Base, engine, init_db
 from app.models import user  # noqa: F401
 from sqlalchemy.orm import Session
 from app.database.db import SessionLocal
@@ -16,6 +16,9 @@ print("Tables created successfully.")
 print("Creating tables...")
 Base.metadata.create_all(bind=engine)
 print("Tables created successfully!")
+print("Applying safe schema updates...")
+init_db()
+print("Schema updates applied.")
 
 # Optional: create a superadmin user if env vars are set (DEV / ops convenience)
 email = os.environ.get("SUPERADMIN_EMAIL")

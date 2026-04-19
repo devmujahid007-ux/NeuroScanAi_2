@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 
 import logo from "../assests/logo.png";
 import heroMRI from "../assests/heroMRI.jpg";
-import { getRecentAnalyses, streamAnalyses, BASE_URL } from "../api";
+import { getRecentAnalyses, streamAnalyses, absoluteUrl } from "../api";
 
 /** Feature card */
 const Feature = ({ title, desc, icon }) => (
@@ -46,8 +46,6 @@ export default function Home() {
 
   /** ---------- HELPERS ---------- **/
   const clampPct = (n) => Math.max(0, Math.min(100, Number(n) || 0));
-  const isImagePath = (path) =>
-    typeof path === "string" && /\.(png|jpg|jpeg|webp|gif)$/i.test(path);
   const normalizeConfidencePct = (value) => {
     const num = Number(value);
     if (!Number.isFinite(num)) return null;
@@ -61,14 +59,31 @@ export default function Home() {
         const dateObj = row?.date ? new Date(row.date) : null;
         const dateLabel =
           dateObj && !Number.isNaN(dateObj.getTime()) ? dateObj.toLocaleString() : "Recent";
+        const reportMatch =
+          typeof row?.reportDownloadUrl === "string" ? row.reportDownloadUrl.match(/\/reports\/(\d+)/) : null;
+        const reportIdFromApi = reportMatch ? reportMatch[1] : null;
+        const rawId = row?.id;
+        const numericReportId =
+          typeof rawId === "number"
+            ? String(rawId)
+            : typeof rawId === "string" && /^\d+$/.test(rawId)
+              ? rawId
+              : null;
+        const viewUrl =
+          reportIdFromApi != null
+            ? `/results/${reportIdFromApi}`
+            : numericReportId != null
+              ? `/results/${numericReportId}`
+              : "/login";
+        const previewSrc = absoluteUrl(row?.imageUrl);
         return {
-          id: row?.id,
+          id: row?.diagnosis_id ?? row?.id ?? rawId,
           prediction: row?.prediction || row?.label || "Pending",
           confidence: normalizeConfidencePct(row?.confidence),
           patientLabel: row?.patient?.name || row?.patient?.email || `Case #${row?.scan_id ?? row?.id}`,
           timeLabel: dateLabel,
-          imageUrl: isImagePath(row?.imageUrl) ? `${BASE_URL}${row.imageUrl}` : null,
-          viewUrl: row?.id ? `/results/${row.id}` : "/login",
+          imageUrl: previewSrc,
+          viewUrl,
         };
       }),
     [recentAnalyses]
@@ -191,7 +206,10 @@ export default function Home() {
                   {firstAnalysis.prediction || "Prediction available"}
                 </div>
                 <div className="text-xs text-slate-600 mt-1">
-                  Confidence: {clampPct(firstAnalysis.confidence)}%
+                  Confidence:{" "}
+                  {firstAnalysis.confidence != null
+                    ? `${normalizeConfidencePct(firstAnalysis.confidence)?.toFixed(2) ?? "—"}%`
+                    : "—"}
                 </div>
               </div>
             )}

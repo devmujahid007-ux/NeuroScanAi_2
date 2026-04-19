@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Text, Enum, ForeignKey, TIMESTAMP, DateTime, func
+from sqlalchemy import Column, Integer, String, Float, Text, Enum, ForeignKey, TIMESTAMP, DateTime, BigInteger, func
 from sqlalchemy.orm import relationship
 from app.database.db import Base
 from app.models.user import User
@@ -33,7 +33,11 @@ class MRIScan(Base):
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(Integer, ForeignKey("users.id"))
     doctor_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    file_path = Column(String(255))
+    file_path = Column(String(512))
+    original_filename = Column(String(255), nullable=True)
+    upload_source = Column(String(32), nullable=False, default="web")
+    upload_size_bytes = Column(BigInteger, nullable=True)
+    scan_kind = Column(String(32), nullable=False, default="mri")
     status = Column(Enum(ScanStatus), default=ScanStatus.pending)
     upload_date = Column(TIMESTAMP)
     sent_date = Column(TIMESTAMP, nullable=True)
@@ -57,6 +61,9 @@ class Diagnosis(Base):
     confidence = Column(Float)
     model_version = Column(String(255))
     model_meta = Column(Text, nullable=True)
+    result_payload = Column(Text, nullable=True)
+    result_image_path = Column(String(512), nullable=True)
+    analyzed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     scan = relationship("MRIScan", back_populates="diagnosis")
     report = relationship("Report", back_populates="diagnosis", uselist=False)
@@ -78,5 +85,6 @@ class Report(Base):
     # Canonical stored path on disk (same as pdf_path for new reports; exposed as file_path in API)
     file_path = Column(String(512), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
 
     diagnosis = relationship("Diagnosis", back_populates="report")

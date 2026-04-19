@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>NeuroScan AI — Alzheimer Detection Report</title>
+  <style>
+    @page { size: A4; margin: 18mm; }
+    body { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; font-size: 11pt; color: #1a1a1a; }
+    h1 { font-size: 18pt; margin: 0 0 8px 0; }
+    h2 { font-size: 13pt; margin: 18px 0 8px 0; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+    .muted { color: #555; font-size: 9.5pt; }
+    table.meta { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    table.meta td { padding: 6px 8px; border: 1px solid #ddd; vertical-align: top; }
+    table.meta td.k { width: 32%; background: #f6f8fa; font-weight: bold; }
+    .figure { margin-top: 10px; text-align: center; page-break-inside: avoid; }
+    .figure img { max-width: 100%; height: auto; border: 1px solid #ddd; }
+    .caption { font-size: 9pt; color: #444; margin-top: 4px; }
+    .box { border: 1px solid #ddd; padding: 10px; background: #fafafa; margin-top: 8px; }
+    .disclaimer { border: 1px solid #c00; padding: 10px; background: #fff5f5; margin-top: 14px; font-size: 10pt; }
+  </style>
+</head>
+<body>
+  <h1>Brain MRI — Alzheimer Detection (2D image)</h1>
+  <p class="muted">Generated {{ generated_at }} · Report ID {{ report_db_id }}</p>
+
+  <h2>Patient information</h2>
+  <table class="meta">
+    <tr><td class="k">Name</td><td>{{ patient_name }}</td></tr>
+    <tr><td class="k">Patient ID</td><td>{{ patient_id }}</td></tr>
+    <tr><td class="k">Age</td><td>{{ age }}</td></tr>
+    <tr><td class="k">Sex / gender</td><td>{{ gender }}</td></tr>
+    <tr><td class="k">Upload date</td><td>{{ scan_date }}</td></tr>
+  </table>
+
+  <h2>Model results</h2>
+  <table class="meta">
+    <tr><td class="k">AI model</td><td>{{ model_name }}</td></tr>
+    <tr><td class="k">Prediction</td><td><strong>{{ prediction_label }}</strong></td></tr>
+    <tr><td class="k">Confidence (top class)</td><td>{{ confidence_score }}%</td></tr>
+    <tr><td class="k">Classes</td><td>{{ num_classes }}</td></tr>
+  </table>
+
+  <h2>Class probabilities</h2>
+  <div class="box">
+    <p>{{ probs_paragraph }}</p>
+  </div>
+
+  <div class="figure">
+    {% if input_image_data_uri %}
+    <img src="{{ input_image_data_uri }}" alt="Patient upload"/>
+    <div class="caption">Image submitted for this analysis (patient upload).</div>
+    {% endif %}
+  </div>
+
+  <h2>Clinical note</h2>
+  <div class="box">
+    <p>{{ findings_paragraph }}</p>
+  </div>
+
+  <div class="disclaimer">
+    {{ disclaimer_text }}
+  </div>
+</body>
+</html>

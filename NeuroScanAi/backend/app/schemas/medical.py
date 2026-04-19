@@ -17,6 +17,7 @@ class MRIScanOut(BaseModel):
     status: ScanStatus
     upload_date: datetime
     sent_date: Optional[datetime] = None
+    scan_kind: str = "mri"
     model_config = ConfigDict(from_attributes=True)
 
 class DiagnosisCreate(BaseModel):

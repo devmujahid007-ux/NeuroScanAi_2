@@ -14,7 +14,7 @@ from app.database.db import SessionLocal
 from app.models.medical import MRIScan
 from app.models.user import User
 from app.security.jwt import get_current_user
-from app.ml.volume_io import get_preview_png, load_volume_and_shape, resolve_scan_volume_paths
+from app.ml.volume_io import collect_files_for_scan_download, get_preview_png, load_volume_and_shape
 
 router = APIRouter(prefix="/mri", tags=["MRI"])
 
@@ -105,14 +105,29 @@ def download_scan_volume(
         raise HTTPException(status_code=404, detail="Scan file missing on server")
     if os.path.isdir(path):
         try:
-            ordered_paths = resolve_scan_volume_paths(path)
+            files_to_zip = collect_files_for_scan_download(path)
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Could not prepare scan download: {e}") from e
+        if not files_to_zip:
+            raise HTTPException(
+                status_code=400,
+                detail="No MRI volume files (.nii, .nii.gz, .dcm) found under this scan folder.",
+            )
 
+        root_abs = os.path.abspath(path)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for volume_path in ordered_paths:
-                archive.write(volume_path, arcname=os.path.basename(volume_path))
+            for volume_path in files_to_zip:
+                vp_abs = os.path.abspath(volume_path)
+                try:
+                    arcname = os.path.relpath(vp_abs, root_abs)
+                except ValueError:
+                    arcname = os.path.basename(vp_abs)
+                if arcname.startswith(".."):
+                    arcname = os.path.basename(vp_abs)
+                archive.write(vp_abs, arcname=arcname)
         headers = {
             "Content-Disposition": f'attachment; filename="scan_{scan_id}_modalities.zip"'
         }

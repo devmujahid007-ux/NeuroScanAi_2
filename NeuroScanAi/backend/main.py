@@ -6,6 +6,7 @@ from uuid import uuid4
 import numpy as np
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from app.database.db import init_db
 from app.routers import auth, upload, users, analyses, stats, patients, mri_preview, reports_pdf
@@ -14,7 +15,7 @@ from fastapi.responses import JSONResponse
 
 from app.model_loader import load_model
 from app.preprocessing import load_mri_images, preprocess
-from app.inference import predict
+from app.inference import predict_segmentation_with_confidence
 from app.visualization import save_overlay
 
 @asynccontextmanager
@@ -26,19 +27,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TAD Backend", version="2.0.0", lifespan=lifespan)
 
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
 
+class AllowPrivateNetworkMiddleware(BaseHTTPMiddleware):
+    """Chrome: http://localhost (React or Flutter web) may need this to reach LAN APIs."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
+
+
+# JWT uses Authorization headers (not cookies). Wildcard CORS lets React (3000), Flutter
+# web (random port), and mobile/LAN clients call the same API without listing every origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_private_network=True,
     expose_headers=["X-Report-Id", "X-Report-File-Url"],
 )
+app.add_middleware(AllowPrivateNetworkMiddleware)
 
 app.include_router(auth.router)
 app.include_router(upload.router)
@@ -102,17 +112,23 @@ async def predict_api(
         image = load_mri_images(saved_paths)
         vis_image = image.copy()
         image = preprocess(image)
-        seg = predict(model, image, device)
+        seg, conf_pct = predict_segmentation_with_confidence(model, image, device)
 
         output_file_name = f"result_{uuid4().hex}.png"
         output_path = os.path.join(OUTPUT_DIR, output_file_name)
         save_overlay(vis_image, seg, output_path)
 
-        tumor_voxels = int(np.count_nonzero(np.asarray(seg) > 0))
+        seg_arr = np.asarray(seg)
+        tumor_voxels = int(np.count_nonzero(seg_arr > 0))
+        uniq, cnts = np.unique(seg_arr, return_counts=True)
+        label_counts = {str(int(u)): int(c) for u, c in zip(uniq, cnts)}
         return {
             "message": "Tumor Detected" if tumor_voxels > 0 else "No Tumor Detected",
-            "output_image": f"http://127.0.0.1:8000/outputs/{output_file_name}",
-            "tumor_volume": f"{tumor_voxels} mm³",
+            "output_image": f"/outputs/{output_file_name}",
+            "tumor_volume": f"{tumor_voxels} positive mask voxels",
+            "confidence": float(conf_pct) if np.isfinite(conf_pct) else None,
+            "model_version": "MONAI BraTS SegResNet (3D sliding-window, same weights as clinic PDF pipeline)",
+            "probs": label_counts,
         }
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -126,6 +142,57 @@ async def predict_api(
                 upload_file.file.close()
             except Exception:
                 pass
+
+@app.post("/alz_predict")
+async def alz_predict_api(image: UploadFile = File(..., description="PNG or JPEG brain MRI image")):
+    """
+    Standalone Alzheimer image inference (separate from tumor ``/predict`` ZIP/NIfTI pipeline).
+    Loads ``alz_model_accurate.pth`` once (cached inside ``app.ml.alzheimer_inference``).
+    """
+    from app.ml.alzheimer_inference import predict_alzheimer_from_image_path
+
+    lower = (image.filename or "").lower()
+    allowed = (".png", ".jpg", ".jpeg")
+    if not any(lower.endswith(ext) for ext in allowed):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Expected image file: .png, .jpg, or .jpeg"},
+        )
+    ext = ".png"
+    if lower.endswith(".jpeg"):
+        ext = ".jpeg"
+    elif lower.endswith(".jpg"):
+        ext = ".jpg"
+
+    tmp = os.path.join(TEMP_UPLOAD_DIR, f"alz_{uuid4().hex}{ext}")
+    try:
+        with open(tmp, "wb") as out:
+            shutil.copyfileobj(image.file, out)
+        out = predict_alzheimer_from_image_path(tmp)
+        return {
+            "prediction": out["prediction"],
+            "confidence": out["confidence"],
+            "probs": out["probs"],
+            "model_version": out["model_version"],
+            "num_classes": out.get("num_classes"),
+        }
+    except RuntimeError as e:
+        return JSONResponse(status_code=503, content={"error": str(e)})
+    except Exception as e:
+        print("Alzheimer prediction error:", repr(e))
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": f"Alzheimer prediction failed: {str(e)}"})
+    finally:
+        try:
+            image.file.close()
+        except Exception:
+            pass
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
 
 @app.get("/")
 def root():

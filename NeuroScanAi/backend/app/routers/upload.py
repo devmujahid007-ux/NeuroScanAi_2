@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import types
 import zipfile
 from datetime import datetime
 from typing import Optional
@@ -25,6 +26,8 @@ os.makedirs(SCANS_UPLOAD_DIR, exist_ok=True)
 MRI_MODALITY_ORDER = ("t1c", "t1n", "t2f", "t2w")
 ALLOWED_MRI_EXTS = {".dcm", ".nii", ".nii.gz"}
 MAX_ZIP_BYTES = int(os.getenv("MRI_ZIP_MAX_BYTES", str(500 * 1024 * 1024)))
+ALLOWED_ALZ_IMAGE_EXT = {".png", ".jpg", ".jpeg"}
+MAX_ALZ_IMAGE_BYTES = int(os.getenv("ALZ_IMAGE_MAX_BYTES", str(20 * 1024 * 1024)))
 
 router = APIRouter(prefix="/mri", tags=["MRI"])
 
@@ -40,6 +43,22 @@ def get_db():
         db.close()
 
 WORKFLOW_STATUSES = (ScanStatus.sent, ScanStatus.analyzed, ScanStatus.reported)
+
+
+def _public_uploads_url(abs_path: str) -> str | None:
+    """Expose a file under ``UPLOAD_DIR`` as ``/uploads/...`` (for patient/doctor dashboards)."""
+    if not abs_path:
+        return None
+    try:
+        candidate = os.path.abspath(abs_path)
+        if not os.path.isfile(candidate):
+            return None
+        rel = os.path.relpath(candidate, UPLOAD_DIR).replace("\\", "/")
+        if rel.startswith(".."):
+            return None
+        return f"/uploads/{rel}"
+    except Exception:
+        return None
 
 
 def _get_upload_ext(upload: UploadFile) -> str:
@@ -79,6 +98,50 @@ def _validate_all_modalities_present(files_by_modality: dict[str, Optional[Uploa
             status_code=400,
             detail="All 4 MRI modalities required: t1c, t1n, t2f, t2w",
         )
+
+
+def _upload_nonempty(f: Optional[UploadFile]) -> bool:
+    """True if multipart part has a filename or a non-empty body (Flutter Web may omit filename)."""
+    if f is None:
+        return False
+    if (f.filename or "").strip():
+        return True
+    try:
+        fp = f.file
+        pos = fp.tell()
+    except Exception:
+        return False
+    try:
+        fp.seek(0, os.SEEK_END)
+        size = fp.tell()
+        fp.seek(0)
+        return size > 0
+    except Exception:
+        try:
+            fp.seek(pos)
+        except Exception:
+            pass
+        return False
+
+
+def _use_zip_upload(mri_zip: Optional[UploadFile]) -> bool:
+    """Detect patient ZIP: ``.zip`` filename or ZIP local file header (``PK``) after rewind."""
+    if mri_zip is None or not _upload_nonempty(mri_zip):
+        return False
+    if (mri_zip.filename or "").strip().lower().endswith(".zip"):
+        try:
+            mri_zip.file.seek(0)
+        except Exception:
+            pass
+        return True
+    try:
+        fp = mri_zip.file
+        fp.seek(0)
+        head = fp.read(4)
+        fp.seek(0)
+        return len(head) >= 2 and head[0] == 0x50 and head[1] == 0x4B
+    except Exception:
+        return False
 
 
 def _save_modalities_to_scan_dir(scan_id: int, files_by_modality: dict[str, UploadFile]) -> str:
@@ -308,8 +371,10 @@ def upload_mri(
         "t2f": t2f,
         "t2w": t2w,
     }
-    zip_name = (mri_zip.filename or "").strip() if mri_zip else ""
-    use_zip = bool(zip_name) and zip_name.lower().endswith(".zip")
+    use_zip = _use_zip_upload(mri_zip)
+    zip_name = ((mri_zip.filename or "").strip() if mri_zip else "") or (
+        "upload.zip" if use_zip else ""
+    )
 
     if role == "patient":
         if not use_zip:
@@ -360,6 +425,9 @@ def upload_mri(
         patient_id=patient_id,
         doctor_id=scan_doctor_id,
         file_path="",
+        original_filename=zip_name if use_zip else ",".join((files_by_modality[m].filename or "") for m in MRI_MODALITY_ORDER),
+        upload_source="patient_zip" if use_zip else "multi_file",
+        scan_kind="mri",
         status=status,
         upload_date=datetime.utcnow(),
         sent_date=sent_date,
@@ -371,6 +439,140 @@ def upload_mri(
     else:
         fpath = _save_modalities_to_scan_dir(scan.id, files_by_modality)
     scan.file_path = fpath
+    db.commit()
+    db.refresh(scan)
+    return scan
+
+
+@router.post("/upload-zip", response_model=MRIScanOut)
+def upload_patient_mri_zip_only(
+    mri_zip: UploadFile = File(..., description="Single MRI .zip (patient accounts only)"),
+    doctor_id: int = Form(...),
+    db: Session = Depends(get_db),
+    current=Depends(role_required("patient")),
+):
+    """Patient ZIP upload without ``t1c``/``t1n``/… multipart fields (avoids stray modality validation)."""
+    payload = mri_zip.file.read()
+    if len(payload) < 4 or payload[0] != 0x50 or payload[1] != 0x4B:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload a valid ZIP archive (form field mri_zip).",
+        )
+    display_name = (mri_zip.filename or "").strip() or "upload.zip"
+    if not display_name.lower().endswith(".zip"):
+        display_name = f"{display_name}.zip"
+    zip_upload = types.SimpleNamespace(
+        filename=display_name,
+        file=io.BytesIO(payload),
+    )
+
+    assign_id = doctor_id if doctor_id > 0 else None
+    if assign_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "doctor_id is required. Choose which doctor should receive this MRI."
+            ),
+        )
+    doctor = (
+        db.query(User)
+        .filter(User.id == assign_id, func.lower(User.role) == "doctor")
+        .first()
+    )
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    scan = MRIScan(
+        patient_id=current.id,
+        doctor_id=doctor.id,
+        file_path="",
+        original_filename=display_name,
+        upload_source="patient_zip",
+        scan_kind="mri",
+        status=ScanStatus.sent,
+        upload_date=datetime.utcnow(),
+        sent_date=datetime.utcnow(),
+    )
+    db.add(scan)
+    db.flush()
+    fpath = _save_modalities_from_zip(scan.id, zip_upload)
+    scan.file_path = fpath
+    db.commit()
+    db.refresh(scan)
+    return scan
+
+
+@router.post("/upload-alz-image", response_model=MRIScanOut)
+def upload_alzheimer_patient_image(
+    image: UploadFile = File(..., description="PNG or JPEG brain MRI slice / image"),
+    doctor_id: int = Form(...),
+    db: Session = Depends(get_db),
+    current=Depends(role_required("patient")),
+):
+    """
+    Patient-only: upload a single image for Alzheimer detection (not the tumor ZIP pipeline).
+    Stored under ``uploads/scans/<id>/`` and queued to the selected doctor (status ``sent``).
+    """
+    name = (image.filename or "").strip().lower()
+    ext = ""
+    if name.endswith(".jpeg"):
+        ext = ".jpeg"
+    elif name.endswith(".jpg"):
+        ext = ".jpg"
+    elif name.endswith(".png"):
+        ext = ".png"
+    if ext not in ALLOWED_ALZ_IMAGE_EXT:
+        raise HTTPException(
+            status_code=400,
+            detail="Allowed image types: .png, .jpg, .jpeg",
+        )
+
+    assign_id = doctor_id if doctor_id > 0 else None
+    if assign_id is None:
+        raise HTTPException(status_code=400, detail="doctor_id is required.")
+    doctor = (
+        db.query(User)
+        .filter(User.id == assign_id, func.lower(User.role) == "doctor")
+        .first()
+    )
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    raw = image.file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Image file is empty")
+    if len(raw) > MAX_ALZ_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Image too large (max {MAX_ALZ_IMAGE_BYTES // (1024 * 1024)} MB)",
+        )
+
+    display_name = (image.filename or "").strip() or f"alz_upload{ext}"
+    scan = MRIScan(
+        patient_id=current.id,
+        doctor_id=doctor.id,
+        file_path="",
+        original_filename=display_name,
+        upload_source="patient_alz_image",
+        scan_kind="alzheimer",
+        status=ScanStatus.sent,
+        upload_date=datetime.utcnow(),
+        sent_date=datetime.utcnow(),
+        upload_size_bytes=len(raw),
+    )
+    db.add(scan)
+    db.flush()
+
+    scan_dir = os.path.join(SCANS_UPLOAD_DIR, str(scan.id))
+    if os.path.isdir(scan_dir):
+        shutil.rmtree(scan_dir, ignore_errors=True)
+    os.makedirs(scan_dir, exist_ok=True)
+    dest_name = f"alz_image{ext}"
+    dest_abs = os.path.join(scan_dir, dest_name)
+    with open(dest_abs, "wb") as out:
+        out.write(raw)
+
+    scan.file_path = dest_abs
     db.commit()
     db.refresh(scan)
     return scan
@@ -438,14 +640,18 @@ def get_patient_scans(
 
     out = []
     for scan in scans:
-        filename = os.path.basename(scan.file_path or "")
+        fp = (scan.file_path or "").strip()
+        filename = os.path.basename(fp) if fp else ""
+        file_url = _public_uploads_url(fp) if fp else None
+        sk = getattr(scan, "scan_kind", None) or "mri"
         out.append({
             "id": scan.id,
             "patient_id": scan.patient_id,
             "doctor_id": scan.doctor_id,
             "file_path": scan.file_path,
             "file_name": filename,
-            "file_url": f"/uploads/{filename}" if filename else None,
+            "file_url": file_url,
+            "scan_kind": sk,
             "status": scan.status.value if hasattr(scan.status, "value") else scan.status,
             "upload_date": scan.upload_date.isoformat() if scan.upload_date else None,
             "sent_date": scan.sent_date.isoformat() if scan.sent_date else None,
@@ -482,7 +688,10 @@ def get_doctor_requests(
     # Enrich with diagnosis and report data
     result = []
     for scan in scans:
-        filename = os.path.basename(scan.file_path or "")
+        fp = (scan.file_path or "").strip()
+        filename = os.path.basename(fp) if fp else ""
+        file_url = _public_uploads_url(fp) if fp else None
+        sk = getattr(scan, "scan_kind", None) or "mri"
         scan_dict = {
             "id": scan.id,
             "scan_id": scan.id,
@@ -490,7 +699,8 @@ def get_doctor_requests(
             "doctor_id": scan.doctor_id,
             "file_path": scan.file_path,
             "file_name": filename,
-            "file_url": f"/uploads/{filename}" if filename else None,
+            "file_url": file_url,
+            "scan_kind": sk,
             "status": scan.status.value if hasattr(scan.status, "value") else scan.status,
             "upload_date": scan.upload_date.isoformat() if scan.upload_date else None,
             "sent_date": scan.sent_date.isoformat() if scan.sent_date else None,

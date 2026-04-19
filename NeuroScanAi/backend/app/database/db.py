@@ -50,6 +50,18 @@ def init_db():
                 )
             if "sent_date" not in mri_columns:
                 conn.execute(text("ALTER TABLE mri_scans ADD COLUMN sent_date TIMESTAMP NULL"))
+            if "original_filename" not in mri_columns:
+                conn.execute(text("ALTER TABLE mri_scans ADD COLUMN original_filename VARCHAR(255) NULL"))
+            if "upload_source" not in mri_columns:
+                conn.execute(
+                    text("ALTER TABLE mri_scans ADD COLUMN upload_source VARCHAR(32) NOT NULL DEFAULT 'web'")
+                )
+            if "upload_size_bytes" not in mri_columns:
+                conn.execute(text("ALTER TABLE mri_scans ADD COLUMN upload_size_bytes BIGINT NULL"))
+            if "scan_kind" not in mri_columns:
+                conn.execute(
+                    text("ALTER TABLE mri_scans ADD COLUMN scan_kind VARCHAR(32) NOT NULL DEFAULT 'mri'")
+                )
 
         if "reports" in table_names:
             report_columns = {col["name"] for col in inspector.get_columns("reports")}
@@ -68,6 +80,8 @@ def init_db():
                 )
             if "file_path" not in report_columns:
                 conn.execute(text("ALTER TABLE reports ADD COLUMN file_path VARCHAR(512) NULL"))
+            if "delivered_at" not in report_columns:
+                conn.execute(text("ALTER TABLE reports ADD COLUMN delivered_at TIMESTAMP NULL"))
 
         if "diagnoses" in table_names:
             dx_columns = {col["name"] for col in inspector.get_columns("diagnoses")}
@@ -78,3 +92,47 @@ def init_db():
                     conn.execute(text("ALTER TABLE diagnoses MODIFY COLUMN model_version VARCHAR(255) NULL"))
                 except Exception:
                     pass
+            if "result_payload" not in dx_columns:
+                conn.execute(text("ALTER TABLE diagnoses ADD COLUMN result_payload TEXT NULL"))
+            if "result_image_path" not in dx_columns:
+                conn.execute(text("ALTER TABLE diagnoses ADD COLUMN result_image_path VARCHAR(512) NULL"))
+            if "analyzed_at" not in dx_columns:
+                conn.execute(
+                    text(
+                        "ALTER TABLE diagnoses ADD COLUMN analyzed_at TIMESTAMP NULL "
+                        "DEFAULT CURRENT_TIMESTAMP"
+                    )
+                )
+
+        # --- Alzheimer + multi-path storage (same tables as tumor; no new tables) ---
+        # scan_kind='alzheimer' on mri_scans; disease_type='alzheimer' on diagnoses; reports unchanged.
+        if "mri_scans" in table_names:
+            try:
+                conn.execute(
+                    text("ALTER TABLE mri_scans MODIFY COLUMN file_path VARCHAR(512) NULL")
+                )
+            except Exception:
+                pass
+            for idx_sql in (
+                "CREATE INDEX idx_mri_scans_scan_kind ON mri_scans (scan_kind)",
+                "CREATE INDEX idx_mri_scans_doctor_scan_kind ON mri_scans (doctor_id, scan_kind)",
+                "CREATE INDEX idx_mri_scans_patient_scan_kind ON mri_scans (patient_id, scan_kind)",
+            ):
+                try:
+                    conn.execute(text(idx_sql))
+                except Exception:
+                    pass
+
+        if "diagnoses" in table_names:
+            try:
+                conn.execute(text("CREATE INDEX idx_diagnoses_disease_type ON diagnoses (disease_type)"))
+            except Exception:
+                pass
+
+        if "reports" in table_names:
+            try:
+                conn.execute(
+                    text("CREATE INDEX idx_reports_doctor_created ON reports (doctor_id, created_at)")
+                )
+            except Exception:
+                pass

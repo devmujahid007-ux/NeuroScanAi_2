@@ -137,8 +137,9 @@ export async function me() {
   return res.json();
 }
 
+/** Public feed for the marketing home page (no JWT required; backend allows unauthenticated GET). */
 export async function getRecentAnalyses(limit = 6) {
-  const res = await fetch(`${BASE_URL}/api/analyses/recent?limit=${limit}`, { headers: authHeaders() });
+  const res = await fetch(`${BASE_URL}/api/analyses/recent?limit=${limit}`);
   if (!res.ok) throw new Error("Failed to load recent analyses");
   return res.json();
 }
@@ -423,13 +424,53 @@ export async function uploadPatientMriZip(zipFile, doctorId) {
   if (Number.isFinite(idNum) && idNum > 0) {
     formData.append("doctor_id", String(idNum));
   }
-  const res = await fetch(`${BASE_URL}/mri/upload`, {
+  const auth = { Authorization: `Bearer ${localStorage.getItem("token")}` };
+  let res = await fetch(`${BASE_URL}/mri/upload-zip`, {
+    method: "POST",
+    headers: auth,
+    body: formData,
+  });
+  // Older backends only expose POST /mri/upload — rebuild FormData (body consumed after send).
+  if (res.status === 404) {
+    const fd2 = new FormData();
+    fd2.append("mri_zip", zipFile);
+    if (Number.isFinite(idNum) && idNum > 0) {
+      fd2.append("doctor_id", String(idNum));
+    }
+    res = await fetch(`${BASE_URL}/mri/upload`, {
+      method: "POST",
+      headers: auth,
+      body: fd2,
+    });
+  }
+  if (!res.ok) {
+    let detail = "MRI ZIP upload failed";
+    try {
+      const body = await res.json();
+      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail) || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+/** Patient: single PNG/JPEG for Alzheimer detection (queued to doctor; separate from tumor ZIP flow). */
+export async function uploadPatientAlzImage(imageFile, doctorId) {
+  const formData = new FormData();
+  formData.append("image", imageFile);
+  const idNum = doctorId != null && doctorId !== "" ? Number(doctorId) : NaN;
+  if (Number.isFinite(idNum) && idNum > 0) {
+    formData.append("doctor_id", String(idNum));
+  }
+  const res = await fetch(`${BASE_URL}/mri/upload-alz-image`, {
     method: "POST",
     headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
     body: formData,
   });
   if (!res.ok) {
-    let detail = "MRI ZIP upload failed";
+    let detail = "Alzheimer image upload failed";
     try {
       const body = await res.json();
       detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail) || detail;

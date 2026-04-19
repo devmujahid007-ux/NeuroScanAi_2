@@ -50,6 +50,7 @@ def compute_tumor_metrics(
     if voxel_count == 0:
         return {
             "tumor_detected": False,
+            "tumor_positive_voxels": 0,
             "tumor_volume_mm3": 0.0,
             "tumor_volume_cm3": 0.0,
             "tumor_location": "Not applicable (no enhancing or tumor-associated voxels detected by the model)",
@@ -81,6 +82,7 @@ def compute_tumor_metrics(
 
     return {
         "tumor_detected": True,
+        "tumor_positive_voxels": voxel_count,
         "tumor_volume_mm3": round(volume_mm3, 2),
         "tumor_volume_cm3": round(volume_cm3, 2),
         "tumor_location": location,

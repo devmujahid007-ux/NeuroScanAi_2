@@ -166,17 +166,19 @@ def create_segmentation_overlay(
 ) -> dict:
     """
     Create a colored tumor mask overlay from segmentation output and save it as PNG.
-    Class colors:
+    Class colors (BraTS-style ids):
       0 background
-      1 tumor core (red)
+      1 tumor core / necrotic (red)
       2 edema (green)
       3 enhancing tumor (blue)
+      4 enhancing tumor (blue; common SegResNet 3-channel decode)
     """
     vol, (d, h, w) = load_volume_and_shape(file_path)
     mask_3d = _to_class_mask_3d(segmentation_output)
     mask_dhw = _align_mask_to_volume(mask_3d, (d, h, w))
 
-    mid = int(d // 2)
+    axial_tumor = (mask_dhw > 0).sum(axis=(1, 2))
+    mid = int(np.argmax(axial_tumor)) if int(axial_tumor.max()) > 0 else int(d // 2)
     mri_slice = get_axial_slice(vol, mid).astype(np.float32)
     mask_slice = mask_dhw[mid, :, :].astype(np.uint8)
 
@@ -188,7 +190,8 @@ def create_segmentation_overlay(
     color_rgb = np.zeros((h, w, 3), dtype=np.float32)
     color_rgb[mask_slice == 1] = np.array([255, 0, 0], dtype=np.float32)  # tumor core
     color_rgb[mask_slice == 2] = np.array([0, 255, 0], dtype=np.float32)  # edema
-    color_rgb[mask_slice == 3] = np.array([0, 0, 255], dtype=np.float32)  # enhancing tumor
+    color_rgb[mask_slice == 3] = np.array([0, 0, 255], dtype=np.float32)  # enhancing
+    color_rgb[mask_slice == 4] = np.array([0, 0, 255], dtype=np.float32)  # enhancing (label4)
 
     alpha = 0.45
     region = (mask_slice > 0)[..., None].astype(np.float32)
@@ -205,4 +208,9 @@ def create_segmentation_overlay(
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     b64 = base64.standard_b64encode(buf.getvalue()).decode("ascii")
-    return {"image_path": out_path, "image_base64": b64, "image_name": file_name}
+    return {
+        "image_path": out_path,
+        "image_base64": b64,
+        "image_name": file_name,
+        "axial_slice_index": mid,
+    }

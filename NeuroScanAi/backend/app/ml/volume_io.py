@@ -62,6 +62,109 @@ def resolve_primary_volume_path(path: str) -> str:
     return resolve_scan_volume_paths(path)[0]
 
 
+def _dir_has_all_modalities(folder: str) -> bool:
+    if not os.path.isdir(folder):
+        return False
+    entries = [e.name for e in os.scandir(folder) if e.is_file()]
+    lower_name_map = {name.lower(): name for name in entries}
+    for modality in MRI_MODALITY_ORDER:
+        found = False
+        for ext in MRI_ALLOWED_EXTENSIONS:
+            candidate = f"{modality}{ext}"
+            if candidate in lower_name_map:
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
+def find_modality_directory(scan_dir: str) -> str | None:
+    """
+    Return a directory under ``scan_dir`` that contains all four BraTS modalities
+    (flat or one/two levels of subfolders). Same rules as patient ZIP ingest.
+    """
+    if _dir_has_all_modalities(scan_dir):
+        return scan_dir
+    try:
+        for entry in os.scandir(scan_dir):
+            if entry.is_dir():
+                if _dir_has_all_modalities(entry.path):
+                    return entry.path
+                for sub in os.scandir(entry.path):
+                    if sub.is_dir() and _dir_has_all_modalities(sub.path):
+                        return sub.path
+    except FileNotFoundError:
+        return None
+    return None
+
+
+def _is_mri_volume_filename(name: str) -> bool:
+    n = name.lower()
+    return (
+        n.endswith(".nii.gz")
+        or n.endswith(".nii")
+        or n.endswith(".dcm")
+        or n.endswith(".dicom")
+    )
+
+
+def _skip_for_download_bundle(filename: str) -> bool:
+    """Exclude server staging artifacts from patient scan ZIPs."""
+    n = filename.lower()
+    return n == "upload.zip" or n.endswith(".tmp")
+
+
+def collect_files_for_scan_download(scan_root: str) -> list[str]:
+    """
+    Paths to place in the doctor-facing download ZIP.
+
+    Does not require BraTS-style t1c/t1n/t2f/t2w names: bundle every NIfTI/DICOM under
+    scan_root (relative paths preserved in the ZIP).
+    """
+    if not scan_root or not os.path.exists(scan_root):
+        raise FileNotFoundError("Scan path missing on server")
+    root_abs = os.path.abspath(scan_root)
+    if os.path.isfile(root_abs):
+        return [root_abs]
+    if not os.path.isdir(root_abs):
+        raise FileNotFoundError("Scan path is not a directory")
+
+    collected: list[str] = []
+    for dirpath, _, filenames in os.walk(root_abs):
+        if "__macosx" in dirpath.lower():
+            continue
+        for fn in filenames:
+            if _skip_for_download_bundle(fn):
+                continue
+            if not _is_mri_volume_filename(fn):
+                continue
+            fp = os.path.join(dirpath, fn)
+            if os.path.isfile(fp):
+                collected.append(fp)
+    collected.sort(key=lambda p: p.lower())
+    return collected
+
+
+def resolve_preview_volume_path(path: str) -> str:
+    """Pick one on-disk volume for 2D preview. Does not require BraTS filenames."""
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError("Scan path missing on server")
+    if os.path.isfile(path):
+        pl = path.lower()
+        if pl.endswith((".nii", ".nii.gz", ".dcm", ".dicom")):
+            return path
+        raise ValueError(f"unsupported MRI extension for preview: {path}")
+    if os.path.isdir(path):
+        files = collect_files_for_scan_download(path)
+        if not files:
+            raise FileNotFoundError(
+                "No MRI volume files (.nii, .nii.gz, .dcm) found for preview"
+            )
+        return files[0]
+    raise FileNotFoundError("Scan path is not a file or directory")
+
+
 def _normalize_modality_volume(volume: np.ndarray) -> np.ndarray:
     """
     Normalize one modality independently (z-score on non-zero voxels).
@@ -153,7 +256,7 @@ def load_volume_and_shape(path: str) -> Tuple[np.ndarray, Tuple[int, int, int]]:
     Load volume as numpy array shaped for axial slicing (depth, H, W).
     Returns (volume, (depth, height, width)).
     """
-    path = resolve_primary_volume_path(path)
+    path = resolve_preview_volume_path(path)
     path_lower = path.lower()
     if path_lower.endswith((".nii", ".nii.gz")):
         if nib is None:
@@ -204,7 +307,7 @@ def get_preview_png(path: str, slice_index: int | None = None) -> Tuple[bytes, i
     Render one axial slice as PNG. If slice_index is None, uses middle slice.
     Returns (png_bytes, slice_used, total_slices).
     """
-    path = resolve_primary_volume_path(path)
+    path = resolve_preview_volume_path(path)
     if not path or not os.path.isfile(path):
         raise FileNotFoundError("scan file missing on disk")
     vol, (d, _, _) = load_volume_and_shape(path)
