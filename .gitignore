@@ -12,6 +12,13 @@ __pycache__/
 *.rar
 .env
 
+# Ignore generated data
+NeuroScanAi/backend/data/
+NeuroScanAi/backend/reports/
+
+# Ignore environment
+.venv/
+
 # Python
 __pycache__/
 *.pyc

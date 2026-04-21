@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <title>NeuroScan AI — Alzheimer Detection Report</title>
+  <title>NeuroScan — Alzheimer Report</title>
   <style>
     @page { size: A4; margin: 18mm; }
     body { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; font-size: 11pt; color: #1a1a1a; }
@@ -20,7 +20,7 @@
   </style>
 </head>
 <body>
-  <h1>Brain MRI — Alzheimer Detection (2D image)</h1>
+  <h1>Brain MRI — Alzheimer Report</h1>
   <p class="muted">Generated {{ generated_at }} · Report ID {{ report_db_id }}</p>
 
   <h2>Patient information</h2>
@@ -28,37 +28,36 @@
     <tr><td class="k">Name</td><td>{{ patient_name }}</td></tr>
     <tr><td class="k">Patient ID</td><td>{{ patient_id }}</td></tr>
     <tr><td class="k">Age</td><td>{{ age }}</td></tr>
-    <tr><td class="k">Sex / gender</td><td>{{ gender }}</td></tr>
-    <tr><td class="k">Upload date</td><td>{{ scan_date }}</td></tr>
+    <tr><td class="k">Scan date</td><td>{{ scan_date }}</td></tr>
   </table>
 
-  <h2>Model results</h2>
+  <h2>Model results (this report run)</h2>
+  <p class="muted">Values below are produced by the server analysis pass that built this PDF (not a cached prior report).</p>
   <table class="meta">
-    <tr><td class="k">AI model</td><td>{{ model_name }}</td></tr>
     <tr><td class="k">Prediction</td><td><strong>{{ prediction_label }}</strong></td></tr>
-    <tr><td class="k">Confidence (top class)</td><td>{{ confidence_score }}%</td></tr>
+    <tr><td class="k">Mean class confidence</td><td>{% if confidence_score == 'N/A' %}N/A{% else %}{{ confidence_score }}%{% endif %}</td></tr>
     <tr><td class="k">Classes</td><td>{{ num_classes }}</td></tr>
+    <tr><td class="k">AI model</td><td>{{ model_name }}</td></tr>
+    <tr><td class="k">Report generated</td><td>{{ generated_at }}</td></tr>
   </table>
 
-  <h2>Class probabilities</h2>
+  <h2>Findings</h2>
   <div class="box">
-    <p>{{ probs_paragraph }}</p>
+    <p>{{ findings_paragraph }}</p>
+    <p><strong>Class probabilities:</strong> {{ probs_paragraph }}</p>
+  </div>
+
+  <h2>Analysis</h2>
+  <div class="box">
+    <p>{{ analysis_paragraph }}</p>
+    <p class="muted">Class histogram: {{ label_histogram }}</p>
   </div>
 
   <div class="figure">
-    {% if input_image_data_uri %}
-    <img src="{{ input_image_data_uri }}" alt="Patient upload"/>
-    <div class="caption">Image submitted for this analysis (patient upload).</div>
+    {% if overlay_image_data_uri %}
+    <img src="{{ overlay_image_data_uri }}" alt="Alzheimer input image"/>
+    <div class="caption">Image used for Alzheimer classification.</div>
     {% endif %}
-  </div>
-
-  <h2>Clinical note</h2>
-  <div class="box">
-    <p>{{ findings_paragraph }}</p>
-  </div>
-
-  <div class="disclaimer">
-    {{ disclaimer_text }}
   </div>
 </body>
 </html>

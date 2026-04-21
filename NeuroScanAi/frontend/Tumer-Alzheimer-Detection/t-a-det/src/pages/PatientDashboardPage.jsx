@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
-import LogoutButton from "../components/LogoutButton";
 import {
+  deletePatientTumorScan,
   fetchReportPdfBlobByReportId,
   getPatientScans,
   listDoctors,
@@ -39,6 +39,21 @@ function latestReportForScan(reportsList, scanId) {
   return rows.reduce((a, b) => (Number(b.id) > Number(a.id) ? b : a));
 }
 
+/** Patient-facing label for tumor requests sent to the doctor (pending / sent / reported). */
+function tumorRequestStatusLabel(scan) {
+  const s = (scan.status || "").toLowerCase();
+  if (s === "reported") return { key: "reported", label: "Reported" };
+  if (s === "pending") return { key: "pending", label: "Pending" };
+  // sent, analyzed, or anything else in-flight with the clinic
+  return { key: "sent", label: "Sent" };
+}
+
+const tumorRequestStatusClasses = {
+  pending: "bg-amber-100 text-amber-900",
+  sent: "bg-blue-100 text-blue-800",
+  reported: "bg-green-100 text-green-800",
+};
+
 export default function PatientDashboardPage() {
   const [scans, setScans] = useState([]);
   const [reports, setReports] = useState([]);
@@ -50,6 +65,7 @@ export default function PatientDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [deletingTumorScanId, setDeletingTumorScanId] = useState(null);
   /** @type {['tumor','alzheimer']} */
   const [dashMode, setDashMode] = useState("tumor");
 
@@ -216,6 +232,31 @@ export default function PatientDashboardPage() {
     }
   };
 
+  const handleDeleteTumorRequest = async (scanId) => {
+    const id = Number(scanId);
+    if (!id) return;
+    if (
+      !window.confirm(
+        "Delete this tumor request? It will be removed for you and your doctor, including any stored MRI, results, and reports. This cannot be undone."
+      )
+    ) {
+      return;
+    }
+    try {
+      setDeletingTumorScanId(id);
+      setError(null);
+      await deletePatientTumorScan(id);
+      const [scansData, reportsData] = await Promise.all([getPatientScans(), listReports()]);
+      setScans(scansData || []);
+      setReports(reportsData || []);
+      setNotice(`Tumor request #${id} was deleted.`);
+    } catch (e) {
+      setError(e?.message || "Could not delete this request.");
+    } finally {
+      setDeletingTumorScanId(null);
+    }
+  };
+
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center">Loading patient dashboard...</div>;
   }
@@ -226,19 +267,19 @@ export default function PatientDashboardPage() {
         <div>
           <h2 className="text-3xl font-bold text-slate-800">Patient Dashboard</h2>
           <p className="text-slate-500 mt-1">
-            Tumor workflow: ZIP of MRI volumes. Alzheimer workflow: one PNG/JPEG image. When your doctor sends a report,
-            download or view the PDF below.
+            Tumor: upload your MRI volumes in one ZIP file and send them to your doctor. Alzheimer: upload one brain MRI
+            image (PNG or JPEG). For both paths, follow your requests below; when your doctor shares a report, download the
+            PDF from Reports from your doctor (tumor) or use View PDF / Download on your Alzheimer scan row.
           </p>
         </div>
         <div className="flex gap-3 mt-4 md:mt-0 items-center">
           <button
             type="button"
             onClick={loadData}
-            className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50"
+            className="px-4 py-2 rounded-lg bg-blue-600 text-white font-medium border border-blue-600 hover:bg-blue-700"
           >
             Refresh
           </button>
-          <LogoutButton />
         </div>
       </div>
 
@@ -443,25 +484,84 @@ export default function PatientDashboardPage() {
         </section>
         )}
 
+        {dashMode === "tumor" ? (
         <section className="bg-white rounded-2xl shadow-sm p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-slate-800">
-              My scans {dashMode === "tumor" ? "(tumor)" : "(Alzheimer)"}
-            </h3>
+            <h3 className="text-lg font-semibold text-slate-800">My scans (Tumor)</h3>
+            <span className="text-sm text-slate-500">{tumorScans.length} total</span>
+          </div>
+          <p className="text-xs text-slate-500 mb-4">
+            Requests you sent to your doctor. <strong>Pending</strong> is not yet with a doctor; <strong>Sent</strong> means
+            the clinic has your case; <strong>Reported</strong> means your doctor has finalized a report — open{" "}
+            <em>Reports from your doctor</em> below to download the PDF. Use <strong>Delete</strong> to remove a request
+            from both sides (MRI, results, and reports).
+          </p>
+
+          {tumorScans.length === 0 ? (
+            <p className="text-slate-500">Upload a ZIP to create your first tumor scan.</p>
+          ) : (
+            <div className="space-y-3">
+              {tumorScans.map((scan) => {
+                const { key, label } = tumorRequestStatusLabel(scan);
+                return (
+                  <div
+                    key={scan.id}
+                    className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-4 bg-slate-50 rounded-lg"
+                  >
+                    <div>
+                      <div className="text-xs font-mono text-slate-500">Scan ID {scan.id}</div>
+                      <div className="text-sm font-semibold text-slate-800">{scan.file_name || `File #${scan.id}`}</div>
+                      <div className="text-xs text-slate-600 mt-1">
+                        Doctor:{" "}
+                        {scan.doctor
+                          ? `${scan.doctor.name || scan.doctor.email} (ID ${scan.doctor_id ?? scan.doctor.id})`
+                          : scan.status === "pending"
+                            ? "Not assigned"
+                            : "—"}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-1">
+                        Uploaded: {scan.upload_date ? new Date(scan.upload_date).toLocaleString() : "Unknown"}
+                        {scan.sent_date ? (
+                          <span className="ml-2">· Sent: {new Date(scan.sent_date).toLocaleString()}</span>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                      <span
+                        className={`px-3 py-1 rounded-full text-xs font-medium ${
+                          tumorRequestStatusClasses[key] || "bg-slate-100 text-slate-700"
+                        }`}
+                      >
+                        {label}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={deletingTumorScanId === scan.id}
+                        onClick={() => handleDeleteTumorRequest(scan.id)}
+                        className="px-3 py-1.5 rounded-lg border border-red-200 bg-white text-red-700 text-xs font-semibold hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {deletingTumorScanId === scan.id ? "Deleting…" : "Delete"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+        ) : (
+        <section className="bg-white rounded-2xl shadow-sm p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-slate-800">My scans (Alzheimer)</h3>
             <span className="text-sm text-slate-500">{activeScans.length} total</span>
           </div>
           <p className="text-xs text-slate-500 mb-4">
             Status mirrors your doctor&apos;s queue: <em>sent</em> and <em>analyzed</em> mean your case is with the
-            clinic; <em>reported</em> means a PDF is ready.
-            {dashMode === "tumor"
-              ? " Use View / Download on each row, or open the full report list in Reports from your doctor below."
-              : " Use View PDF and Download on the row for that scan."}
+            clinic; <em>reported</em> means a PDF is ready. Use View PDF and Download on the row for that scan.
           </p>
 
           {activeScans.length === 0 ? (
-            <p className="text-slate-500">
-              {dashMode === "tumor" ? "Upload a ZIP to create your first tumor scan." : "No Alzheimer uploads yet."}
-            </p>
+            <p className="text-slate-500">No Alzheimer uploads yet.</p>
           ) : (
             <div className="space-y-3">
               {activeScans.map((scan) => {
@@ -524,6 +624,7 @@ export default function PatientDashboardPage() {
             </div>
           )}
         </section>
+        )}
 
         {dashMode === "tumor" && (
         <section className="bg-white rounded-2xl shadow-sm p-6 border border-emerald-100 ring-1 ring-emerald-50">
@@ -531,8 +632,8 @@ export default function PatientDashboardPage() {
             <div>
               <h3 className="text-lg font-semibold text-slate-800">Reports from your doctor</h3>
               <p className="text-xs text-slate-500 mt-1">
-                PDFs your doctor has finalized and sent to you. Use <strong>View</strong> to open in the browser or{" "}
-                <strong>Download</strong> to save a copy.
+                PDF reports your doctor has sent to you. Each row shows <strong>Received</strong> and{" "}
+                <strong>Reported</strong>; use <strong>Download PDF</strong> to save the file.
               </p>
             </div>
             <span className="text-sm text-slate-500 shrink-0">{reportsForCurrentMode.length} in this module</span>
@@ -550,6 +651,14 @@ export default function PatientDashboardPage() {
                   className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-4 rounded-xl border border-slate-200 bg-slate-50/80"
                 >
                   <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2 mb-2">
+                      <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-teal-100 text-teal-900">
+                        Received
+                      </span>
+                      <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-green-100 text-green-900">
+                        Reported
+                      </span>
+                    </div>
                     <div className="text-sm font-semibold text-slate-900">
                       Report #{rep.id}
                       <span className="text-slate-400 font-normal"> · Scan #{rep.scan_id}</span>
@@ -560,31 +669,14 @@ export default function PatientDashboardPage() {
                         <span className="ml-2">· {new Date(rep.created_at).toLocaleString()}</span>
                       ) : null}
                     </div>
-                    {rep.prediction ? (
-                      <div className="text-xs text-slate-500 mt-1 line-clamp-2">Prediction: {rep.prediction}</div>
-                    ) : null}
                   </div>
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <button
                       type="button"
-                      onClick={() => viewReportPdf(rep.id)}
-                      className="px-3 py-2 rounded-lg bg-slate-100 text-slate-800 text-sm font-medium hover:bg-slate-200 border border-slate-200"
-                    >
-                      View PDF
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => downloadReportPdf(rep.id)}
-                      className="px-3 py-2 rounded-lg bg-white text-slate-800 text-sm font-medium hover:bg-slate-50 border border-slate-300"
-                    >
-                      Download (new tab)
-                    </button>
-                    <button
-                      type="button"
                       onClick={() => downloadReportPdfToDisk(rep.id)}
-                      className="px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700"
+                      className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700"
                     >
-                      Save PDF…
+                      Download PDF
                     </button>
                   </div>
                 </li>

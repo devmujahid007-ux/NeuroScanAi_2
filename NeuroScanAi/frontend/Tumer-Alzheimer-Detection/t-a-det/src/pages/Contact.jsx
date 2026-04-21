@@ -1,18 +1,19 @@
 import React, { useState } from "react";
+import { BASE_URL } from "../api";
 
 /**
  * >>> Fill these with your real details <<<
  */
 const CONTACT_INFO = {
-  orgName: "NeuroScan AI",
+  orgName: "NeuroScan",
   address: {
     line1: "",
     line2: "",
     city: "Lahore",
     country: "Pakistan"
   },
-  emails: ["support@neuroscan.ai"],
-  phones: ["+92 3334773180"],
+  emails: ["neuroscan148@gmail.com"],
+  phones: ["03334773180"],
   Address: "Research Lab, Lahore, Pakistan",
 };
 
@@ -43,7 +44,7 @@ const Contact = () => {
     setStatus({ sending: true, ok: null, msg: "" });
 
     try {
-      const res = await fetch("/api/contact", {
+      const res = await fetch(`${BASE_URL}/api/contact`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),

@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import LogoutButton from "../components/LogoutButton";
 import {
   MRI_MODALITIES,
   absoluteUrl,
@@ -14,6 +13,7 @@ import {
   predictTumorSegmentation,
   reportPdfOpenUrl,
   sendReportToPatient,
+  viewAlzheimerLocalResult,
   viewModelResult,
 } from "../api";
 
@@ -292,6 +292,7 @@ export default function DoctorDashboardPage() {
   const [sendingReports, setSendingReports] = useState(new Set());
   const [showUploadSection, setShowUploadSection] = useState(true);
   const [uploadFiles, setUploadFiles] = useState({ t1c: null, t1n: null, t2f: null, t2w: null });
+  const [alzUploadImage, setAlzUploadImage] = useState(null);
   const [uploadNotice, setUploadNotice] = useState(null);
   const [mriViewer, setMriViewer] = useState(null);
   const [workflowScanId, setWorkflowScanId] = useState("");
@@ -404,6 +405,9 @@ export default function DoctorDashboardPage() {
   }, [workflowScans, workflowScanId]);
 
   const selectedWorkflowScan = requests.find((r) => String(r.id) === workflowScanId);
+  const tumorReportReady = doctorModule !== "tumor" || (modelView && modelView.source === "live_segmentation");
+  const alzViewReady = doctorModule !== "alzheimer" || Boolean(alzUploadImage);
+  const alzReportReady = doctorModule !== "alzheimer" || (modelView && modelView.source === "live_alzheimer");
   /** Tumor full result page (`/results/:id`) — matches saved report for the selected scan when present. */
   const reportIdForWorkflowScan = reportList.find((r) => Number(r.scan_id) === Number(workflowScanId))?.id;
 
@@ -425,47 +429,6 @@ export default function DoctorDashboardPage() {
       setUploadNotice(`Download started: ${name}. You can re-upload it below after local review.`);
     } catch (err) {
       setError(err.message);
-    }
-  };
-
-  const handleAnalyzeStored = async () => {
-    if (!workflowScanId) {
-      setError("Select a patient scan first.");
-      return;
-    }
-    const id = Number(workflowScanId);
-    if (!Number.isFinite(id)) {
-      setError("Invalid scan selection.");
-      return;
-    }
-    setViewBusy(true);
-    setInferenceBusyKind("stored");
-    setError(null);
-    setUploadNotice(null);
-    setModelView(null);
-    setPdfUnlockedScanId(null);
-    try {
-      const data = await viewModelResult(id);
-      setModelView({
-        prediction: data?.prediction || "Analysis completed",
-        confidence: data?.confidence ?? null,
-        probs: data?.probs || null,
-        probsAreVoxelCounts: true,
-        tumor_volume: data?.tumor_volume || null,
-        output_image_url: data?.output_image_url || null,
-        model_version: data?.model_version || null,
-        preview_run_at: data?.preview_run_at || null,
-        source: data?.source || "stored_scan",
-      });
-      setPdfUnlockedScanId(id);
-      setResultImageTs(Date.now());
-    } catch (err) {
-      setError(err.message || "Stored-scan analysis failed");
-      setModelView(null);
-      setPdfUnlockedScanId(null);
-    } finally {
-      setViewBusy(false);
-      setInferenceBusyKind(null);
     }
   };
 
@@ -513,14 +476,56 @@ export default function DoctorDashboardPage() {
     }
   };
 
+  const handleViewResultAlzheimerLocal = async () => {
+    if (!workflowScanId) {
+      setError("Select a patient scan first.");
+      return;
+    }
+    if (!alzUploadImage) {
+      setError("Upload Alzheimer PNG/JPG image first.");
+      return;
+    }
+    setViewBusy(true);
+    setInferenceBusyKind("local");
+    setError(null);
+    setUploadNotice(null);
+    setModelView(null);
+    setPdfUnlockedScanId(null);
+    try {
+      const data = await viewAlzheimerLocalResult(Number(workflowScanId), alzUploadImage);
+      setModelView({
+        prediction: data?.prediction || "Analysis completed",
+        confidence: data?.confidence ?? null,
+        probs: data?.probs || null,
+        probsAreVoxelCounts: false,
+        tumor_volume: null,
+        output_image_url: data?.output_image_url || null,
+        model_version: data?.model_version || null,
+        preview_run_at: data?.preview_run_at || null,
+        source: data?.source || "live_alzheimer",
+      });
+      setResultImageTs(Date.now());
+    } catch (err) {
+      setError(err.message || "Alzheimer local result failed");
+      setModelView(null);
+    } finally {
+      setViewBusy(false);
+      setInferenceBusyKind(null);
+    }
+  };
+
   const handleGenerateReport = async () => {
     if (!workflowScanId) {
       setError("Select which patient scan you are working on.");
       return;
     }
     const id = Number(workflowScanId);
-    if (pdfUnlockedScanId !== id) {
-      setError("Run Analyze stored scan for this request first — the PDF uses the server copy of the patient MRI, not local /predict files.");
+    if (doctorModule === "tumor" && !tumorReportReady) {
+      setError("Run View result first. Report uses the current model result.");
+      return;
+    }
+    if (doctorModule === "alzheimer" && !alzReportReady) {
+      setError("Run View result first. Report uses the current model result.");
       return;
     }
     const req = selectedWorkflowScan;
@@ -536,6 +541,13 @@ export default function DoctorDashboardPage() {
         patient_id: req.patient_id,
         patient_name: req.patient?.name || null,
         age: req.patient?.age ?? null,
+        use_current_result: doctorModule === "tumor" || doctorModule === "alzheimer",
+        current_prediction: modelView?.prediction || null,
+        current_confidence: modelView?.confidence ?? null,
+        current_tumor_volume: doctorModule === "tumor" ? modelView?.tumor_volume || null : null,
+        current_probs: modelView?.probs || null,
+        current_output_image_url: modelView?.output_image_url || null,
+        current_model_version: modelView?.model_version || null,
       });
 
       const refreshed = await loadRequests({ quiet: true });
@@ -598,23 +610,11 @@ export default function DoctorDashboardPage() {
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
-            onClick={() => setShowUploadSection((v) => !v)}
-            className={`px-4 py-2 rounded-lg font-medium ${
-              showUploadSection
-                ? "bg-blue-600 text-white hover:bg-blue-700"
-                : "border border-blue-600 text-blue-600 hover:bg-blue-50"
-            }`}
-          >
-            {showUploadSection ? "Hide upload" : "Upload MRI"}
-          </button>
-          <button
-            type="button"
             onClick={loadRequests}
-            className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50"
+            className="px-4 py-2 rounded-lg bg-blue-600 text-white font-medium border border-blue-600 hover:bg-blue-700"
           >
             Refresh
           </button>
-          <LogoutButton />
         </div>
       </div>
 
@@ -708,12 +708,34 @@ export default function DoctorDashboardPage() {
         )}
       </section>
 
-      {showUploadSection && (
-        <section className="bg-white rounded-2xl shadow-sm p-6 mb-6 border border-slate-200 ring-1 ring-slate-100">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4">
+      <section className="bg-white rounded-2xl shadow-sm p-6 mb-6 border border-slate-200 ring-1 ring-slate-100">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <h2 className="text-lg font-semibold text-slate-900">
             {doctorModule === "tumor" ? "MRI — view model output & report" : "Alzheimer — view model output & report"}
           </h2>
+          <div className="flex justify-center sm:justify-end w-full sm:w-auto shrink-0">
+            {showUploadSection ? (
+              <button
+                type="button"
+                onClick={() => setShowUploadSection(false)}
+                className="px-4 py-2 rounded-lg font-medium bg-blue-600 text-white hover:bg-blue-700"
+              >
+                Hide upload
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowUploadSection(true)}
+                className="px-4 py-2 rounded-lg font-medium bg-white border border-blue-600 text-blue-600 hover:bg-blue-50"
+              >
+                Upload MRI
+              </button>
+            )}
+          </div>
+        </div>
 
+        {showUploadSection ? (
+        <>
           <div className="grid gap-4 md:grid-cols-3 mb-5">
             <div>
               <label className="text-sm font-medium text-slate-700 block mb-2">Patient scan (open request)</label>
@@ -802,8 +824,46 @@ export default function DoctorDashboardPage() {
           </div>
           ) : (
             <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-4 text-sm text-indigo-950">
-              Alzheimer cases use the <strong>patient&apos;s uploaded PNG/JPEG</strong> on the server. Use{" "}
-              <strong>Analyze stored scan</strong> to run the Alzheimer model — no BraTS modalities or ZIP staging here.
+              <p className="mb-3">
+                Alzheimer: after download, upload a PNG/JPG scan below and run <strong>View result</strong>.
+              </p>
+              <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="text-xs text-slate-500 mb-2 break-all">
+                  {alzUploadImage ? alzUploadImage.name : "No image selected"}
+                </div>
+                <div className="flex items-center gap-3">
+                  <label
+                    htmlFor="doctor-alz-input"
+                    className="text-blue-600 font-semibold cursor-pointer hover:underline text-sm"
+                  >
+                    Choose PNG/JPG
+                  </label>
+                  <input
+                    id="doctor-alz-input"
+                    type="file"
+                    accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0] || null;
+                      setAlzUploadImage(file);
+                      setUploadNotice(null);
+                    }}
+                  />
+                  {alzUploadImage && (
+                    <button
+                      type="button"
+                      className="text-sm text-slate-500 underline"
+                      onClick={() => {
+                        setAlzUploadImage(null);
+                        const input = document.getElementById("doctor-alz-input");
+                        if (input) input.value = "";
+                      }}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -832,38 +892,24 @@ export default function DoctorDashboardPage() {
                   {viewBusy && inferenceBusyKind === "local" ? "Running model…" : "View result"}
                 </button>
               ) : null}
-              <button
-                type="button"
-                onClick={handleAnalyzeStored}
-                disabled={
-                  viewBusy ||
-                  !workflowScanId ||
-                  workflowScans.length === 0 ||
-                  (doctorModule === "tumor" && tumorFourModalityReady)
-                }
-                title={
-                  doctorModule === "tumor" && tumorFourModalityReady
-                    ? "Clear at least one local modality file to analyze the server-stored scan."
-                    : undefined
-                }
-                className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-              >
-                {viewBusy && inferenceBusyKind === "stored" ? "Running model…" : "Analyze stored scan"}
-              </button>
+              {doctorModule === "alzheimer" ? (
+                <button
+                  type="button"
+                  onClick={handleViewResultAlzheimerLocal}
+                  disabled={viewBusy || !alzViewReady}
+                  className="flex-1 min-w-[180px] px-4 py-3 rounded-xl bg-emerald-600 text-white font-semibold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                >
+                  {viewBusy && inferenceBusyKind === "local" ? "Running model…" : "View result"}
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={handleGenerateReport}
-                title={
-                  workflowScanId &&
-                  workflowScans.length > 0 &&
-                  pdfUnlockedScanId !== Number(workflowScanId)
-                    ? "Run Analyze stored scan successfully first"
-                    : undefined
-                }
                 disabled={
                   !workflowScanId ||
                   workflowScans.length === 0 ||
-                  pdfUnlockedScanId !== Number(workflowScanId) ||
+                  viewBusy ||
+                  !(doctorModule === "tumor" ? tumorReportReady : alzReportReady) ||
                   analyzingScans.has(Number(workflowScanId))
                 }
                 className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
@@ -872,13 +918,8 @@ export default function DoctorDashboardPage() {
               </button>
             </div>
             <p className="text-xs text-slate-600">
-              The PDF uses the patient MRI stored on the server. After each successful PDF, run <strong>Analyze stored scan</strong> again before the next report.
+              For Tumor, generate report is enabled after View result and uses the current model result.
             </p>
-            {workflowScanId && workflowScans.length > 0 && pdfUnlockedScanId !== Number(workflowScanId) ? (
-              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                <strong>Generate report</strong> stays locked until <strong>Analyze stored scan</strong> finishes for this scan.
-              </p>
-            ) : null}
           </div>
 
           {modelView && (
@@ -950,30 +991,18 @@ export default function DoctorDashboardPage() {
             </div>
           )}
 
-          <DoctorReportHistoryBlock
-            reportList={reportList}
-            openReportPdfDownload={openReportPdfDownload}
-            sendSegReportToPatient={sendSegReportToPatient}
-            sendingReports={sendingReports}
-            showViewResultLink={doctorModule === "tumor"}
-          />
-
           {uploadNotice && <p className="mt-4 text-sm text-slate-600">{uploadNotice}</p>}
+        </>
+        ) : null}
 
-        </section>
-      )}
-
-      {!showUploadSection && (
-        <section className="bg-white rounded-2xl shadow-sm p-6 mb-6 border border-slate-200">
-          <DoctorReportHistoryBlock
-            reportList={reportList}
-            openReportPdfDownload={openReportPdfDownload}
-            sendSegReportToPatient={sendSegReportToPatient}
-            sendingReports={sendingReports}
-            showViewResultLink={doctorModule === "tumor"}
-          />
-        </section>
-      )}
+        <DoctorReportHistoryBlock
+          reportList={reportList}
+          openReportPdfDownload={openReportPdfDownload}
+          sendSegReportToPatient={sendSegReportToPatient}
+          sendingReports={sendingReports}
+          showViewResultLink={doctorModule === "tumor" || doctorModule === "alzheimer"}
+        />
+      </section>
 
       {mriViewer && (
         <MriViewerModal scanId={mriViewer.id} fileLabel={mriViewer.label} onClose={closeMriViewer} />

@@ -78,9 +78,16 @@ def create_patient(payload: dict, db: Session = Depends(get_db), current = Depen
         if existing:
             raise HTTPException(status_code=400, detail="email already registered")
 
-    # generate a hidden random password for the account (not returned)
-    raw_password = secrets.token_urlsafe(8)
-    hashed = generate_password_hash(raw_password)
+    password_in = payload.get("password")
+    if isinstance(password_in, str) and password_in.strip():
+        raw_password = password_in.strip()
+        if len(raw_password) < 6:
+            raise HTTPException(status_code=400, detail="password must be at least 6 characters")
+        hashed = generate_password_hash(raw_password)
+    else:
+        # legacy: auto-generated password (not returned; user cannot log in until reset)
+        raw_password = secrets.token_urlsafe(8)
+        hashed = generate_password_hash(raw_password)
 
     new_user = User(email=email or f"patient+{secrets.token_hex(6)}@local", password=hashed, role="patient", name=name, age=age, phone=phone)
     db.add(new_user)

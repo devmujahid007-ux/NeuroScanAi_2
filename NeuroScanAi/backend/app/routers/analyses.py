@@ -3,12 +3,15 @@ import base64
 import json
 import math
 import os
+import shutil
 from datetime import datetime
+from zoneinfo import ZoneInfo
+from urllib.parse import urlparse
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.database.db import SessionLocal
 from app.models.medical import MRIScan, Diagnosis, Report, ScanStatus, DiseaseType
@@ -39,11 +42,13 @@ core_router = APIRouter(prefix="/api", tags=["Reports"])
 
 # Simple in-memory broadcaster for SSE (sufficient for single-process dev)
 _subscribers: list[asyncio.Queue] = []
-REPORTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "reports"))
-os.makedirs(REPORTS_DIR, exist_ok=True)
-RESULTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "results"))
-os.makedirs(RESULTS_DIR, exist_ok=True)
-UPLOADS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads"))
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")
+RESULTS_DIR = os.path.join(DATA_DIR, "results")
+UPLOADS_DIR = DATA_DIR
+for _kind in ("tumor", "alzheimer"):
+    os.makedirs(os.path.join(REPORTS_DIR, _kind), exist_ok=True)
+    os.makedirs(os.path.join(RESULTS_DIR, _kind), exist_ok=True)
 
 
 def get_db():
@@ -60,6 +65,13 @@ class GenerateReportBody(BaseModel):
     patient_name: str | None = None
     age: int | None = None
     gender: str | None = None
+    use_current_result: bool = False
+    current_prediction: str | None = None
+    current_confidence: float | None = None
+    current_tumor_volume: str | None = None
+    current_probs: dict[str, float] | dict[str, int] | None = None
+    current_output_image_url: str | None = None
+    current_model_version: str | None = None
 
 
 class SendReportBody(BaseModel):
@@ -117,6 +129,44 @@ def _uploads_url_from_abs_path(abs_path: str) -> str | None:
     return f"/uploads/{rel_web}"
 
 
+def _abs_path_from_uploads_url(url_path: str | None) -> str | None:
+    if not url_path or not isinstance(url_path, str):
+        return None
+    raw = url_path.strip()
+    parsed_path = urlparse(raw).path if "://" in raw else raw
+
+    if parsed_path.startswith("/uploads/"):
+        rel = parsed_path[len("/uploads/") :].replace("/", os.sep)
+        candidate = os.path.abspath(os.path.join(UPLOADS_DIR, rel))
+        if candidate.startswith(UPLOADS_DIR + os.sep) or candidate == UPLOADS_DIR:
+            if os.path.isfile(candidate):
+                return candidate
+    if parsed_path.startswith("/outputs/"):
+        rel = parsed_path[len("/outputs/") :].replace("/", os.sep)
+        # `/outputs` in this project is mounted to `backend/data/results/tumor`.
+        candidate = os.path.abspath(os.path.join(RESULTS_DIR, "tumor", rel))
+        if candidate.startswith(os.path.join(RESULTS_DIR, "tumor") + os.sep):
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def _scan_storage_kind(scan: MRIScan) -> str:
+    return "alzheimer" if (getattr(scan, "scan_kind", "") or "").lower() == "alzheimer" else "tumor"
+
+
+def _results_dir_for_scan(scan: MRIScan) -> str:
+    d = os.path.join(RESULTS_DIR, _scan_storage_kind(scan))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _reports_dir_for_scan(scan: MRIScan) -> str:
+    d = os.path.join(REPORTS_DIR, _scan_storage_kind(scan))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _scan_preview_url(scan: MRIScan, segmentation_meta: dict | None) -> str | None:
     if segmentation_meta:
         overlay = segmentation_meta.get("overlay_image")
@@ -147,7 +197,7 @@ def _scan_preview_url(scan: MRIScan, segmentation_meta: dict | None) -> str | No
 
 def _write_report_file(scan: MRIScan, diagnosis: Diagnosis, report: Report) -> str:
     filename = f"report_scan_{scan.id}_diagnosis_{diagnosis.id}.txt"
-    output_path = os.path.join(REPORTS_DIR, filename)
+    output_path = os.path.join(_reports_dir_for_scan(scan), filename)
     patient_name = getattr(scan.patient, "name", None) or getattr(scan.patient, "email", "Patient")
     doctor_name = getattr(scan.doctor, "name", None) or getattr(scan.doctor, "email", "Doctor")
     lines = [
@@ -206,6 +256,17 @@ def model_status(current=Depends(role_required("doctor", "admin"))):
     return get_inference_status()
 
 
+def _dt_iso(dt) -> str | None:
+    if dt is None:
+        return None
+    try:
+        if hasattr(dt, "isoformat"):
+            return dt.isoformat()
+    except Exception:
+        return None
+    return None
+
+
 def _serialize_analysis(diagnosis: Diagnosis, report: Report | None, scan: MRIScan) -> dict:
     filename = os.path.basename(scan.file_path or "")
     doctor = getattr(scan, "doctor", None)
@@ -232,6 +293,8 @@ def _serialize_analysis(diagnosis: Diagnosis, report: Report | None, scan: MRISc
         except json.JSONDecodeError:
             segmentation_meta = None
     preview_url = _scan_preview_url(scan, segmentation_meta)
+    analyzed_iso = _dt_iso(getattr(diagnosis, "analyzed_at", None))
+    upload_iso = _dt_iso(getattr(scan, "upload_date", None)) if scan else None
     return {
         "id": report.id if report else f"D-{diagnosis.id}",
         "diagnosis_id": diagnosis.id,
@@ -248,7 +311,8 @@ def _serialize_analysis(diagnosis: Diagnosis, report: Report | None, scan: MRISc
             "email": doctor.email,
             "phone": doctor.phone,
         } if doctor else None,
-        "date": diagnosis.scan.upload_date.isoformat() if diagnosis.scan and diagnosis.scan.upload_date else datetime.utcnow().isoformat(),
+        "analyzed_at": analyzed_iso,
+        "date": analyzed_iso or upload_iso,
         "imageUrl": preview_url,
         "fileName": filename,
         "prediction": diagnosis.prediction,
@@ -298,29 +362,49 @@ def _generate_alzheimer_report_pdf(
     db: Session,
     current,
 ) -> JSONResponse:
+    use_current = bool(body.use_current_result)
     path = (scan.file_path or "").strip()
-    if not path or not os.path.isfile(path):
-        raise HTTPException(status_code=400, detail="Alzheimer scan image missing on server")
-    try:
-        out = predict_alzheimer_from_image_path(path)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Alzheimer inference failed: {e}") from e
+    if use_current:
+        path = _abs_path_from_uploads_url(body.current_output_image_url) or ""
+        if not path or not os.path.isfile(path):
+            raise HTTPException(status_code=400, detail="Current Alzheimer result image not found on server.")
+        out = {
+            "prediction": body.current_prediction or "Prediction unavailable",
+            "confidence": float(body.current_confidence) if body.current_confidence is not None else 0.0,
+            "probs": body.current_probs or {},
+            "model_version": body.current_model_version or "Alzheimer classifier",
+            "num_classes": len(body.current_probs or {}),
+        }
+    else:
+        if not path or not os.path.isfile(path):
+            raise HTTPException(status_code=400, detail="Alzheimer scan image missing on server")
+        try:
+            out = predict_alzheimer_from_image_path(path)
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Alzheimer inference failed: {e}") from e
 
     display_name = (body.patient_name or patient.name or patient.email or f"Patient {patient.id}").strip()
     display_age = body.age if body.age is not None else patient.age
     age_str = str(display_age) if display_age is not None else "Not provided"
-    gender_str = (body.gender or "Not provided").strip()
     scan_date = scan.upload_date.isoformat() if scan.upload_date else datetime.utcnow().isoformat()
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    run_generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    run_generated_at = datetime.now(ZoneInfo("Asia/Karachi")).strftime("%Y-%m-%d %H:%M")
+    if scan.upload_date:
+        scan_dt = scan.upload_date
+        if getattr(scan_dt, "tzinfo", None) is None:
+            scan_dt = scan_dt.replace(tzinfo=ZoneInfo("UTC"))
+        scan_date_display = scan_dt.astimezone(ZoneInfo("Asia/Karachi")).strftime("%Y-%m-%d %H:%M")
+    else:
+        scan_date_display = run_generated_at
 
     prediction = out["prediction"]
     conf_pct = float(out["confidence"])
     conf_display = f"{conf_pct:.2f}" if math.isfinite(conf_pct) else "N/A"
     probs = out.get("probs") or {}
     probs_paragraph = "; ".join(f"{k}: {v}%" for k, v in probs.items()) if probs else "N/A"
+    label_histogram = json.dumps(probs, sort_keys=True) if probs else "{}"
     num_classes = int(out.get("num_classes") or 0)
     model_name = str(out.get("model_version") or "Alzheimer classifier")
 
@@ -328,12 +412,16 @@ def _generate_alzheimer_report_pdf(
         f"The classifier's top prediction is {prediction} with estimated confidence {conf_display}% "
         f"across {num_classes} output classes. This is an AI screening aid only."
     )
+    analysis_paragraph = (
+        "Class probability distribution is produced from the model softmax output for this uploaded image. "
+        "Values indicate model confidence allocation across Alzheimer classes."
+    )
     disclaimer_text = "AI-generated report. Not a substitute for professional diagnosis."
 
     input_data_uri = _image_file_data_uri(path)
     template_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "templates"))
     pdf_name = f"alz_{body.patient_id}_{ts}.pdf"
-    pdf_path = os.path.join(REPORTS_DIR, pdf_name)
+    pdf_path = os.path.join(_reports_dir_for_scan(scan), pdf_name)
 
     jinja_ctx = {
         "generated_at": run_generated_at,
@@ -341,15 +429,17 @@ def _generate_alzheimer_report_pdf(
         "patient_name": display_name,
         "patient_id": str(body.patient_id),
         "age": age_str,
-        "gender": gender_str,
-        "scan_date": scan_date,
+        "scan_date": scan_date_display,
         "model_name": model_name,
         "prediction_label": prediction,
         "confidence_score": conf_display,
         "num_classes": str(num_classes),
         "probs_paragraph": probs_paragraph,
+        "analysis_paragraph": analysis_paragraph,
+        "label_histogram": label_histogram,
         "findings_paragraph": findings_paragraph,
-        "input_image_data_uri": input_data_uri,
+        "mri_image_data_uri": None,
+        "overlay_image_data_uri": input_data_uri,
         "disclaimer_text": disclaimer_text,
     }
 
@@ -480,7 +570,7 @@ def view_model_result(
 
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     preview_name = f"preview_{scan.id}_{ts}.png"
-    out_path = os.path.join(RESULTS_DIR, preview_name)
+    out_path = os.path.join(_results_dir_for_scan(scan), preview_name)
     try:
         save_overlay(vis_image, seg, out_path)
     except Exception as e:
@@ -513,9 +603,62 @@ def view_model_result(
         "visualization_png_base64": png_b64,
         "mask_image_path": out_path,
         "mask_image_base64": png_b64,
-        "output_image_url": f"/uploads/results/{preview_name}",
+        "output_image_url": f"/uploads/results/{_scan_storage_kind(scan)}/{preview_name}",
         "preview_run_at": preview_at,
         "source": "stored_scan",
+    }
+
+
+@router.post("/alz-view-local")
+def view_alzheimer_local_result(
+    scan_id: int = Form(...),
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current=Depends(role_required("doctor", "admin")),
+):
+    scan = _fetch_accessible_scan(scan_id, db, current)
+    sk = (getattr(scan, "scan_kind", None) or "mri").lower()
+    if sk != "alzheimer":
+        raise HTTPException(status_code=400, detail="This endpoint is only for Alzheimer scans")
+
+    name = (image.filename or "").lower()
+    ext = ".png"
+    if name.endswith(".jpeg"):
+        ext = ".jpeg"
+    elif name.endswith(".jpg"):
+        ext = ".jpg"
+    elif not name.endswith(".png"):
+        raise HTTPException(status_code=400, detail="Allowed image types: .png, .jpg, .jpeg")
+
+    raw = image.file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Image file is empty")
+
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    out_name = f"alz_local_{scan.id}_{ts}{ext}"
+    out_path = os.path.join(_results_dir_for_scan(scan), out_name)
+    with open(out_path, "wb") as f:
+        f.write(raw)
+
+    try:
+        out = predict_alzheimer_from_image_path(out_path)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Alzheimer inference failed: {e}") from e
+
+    return {
+        "scan_id": scan.id,
+        "prediction": out["prediction"],
+        "confidence": float(out["confidence"]),
+        "model_version": out.get("model_version"),
+        "probs": out.get("probs"),
+        "tumor_volume": None,
+        "tumor_volume_mm3": None,
+        "output_image_url": f"/uploads/results/alzheimer/{out_name}",
+        "preview_run_at": datetime.utcnow().isoformat() + "Z",
+        "source": "live_alzheimer",
+        "scan_kind": "alzheimer",
     }
 
 
@@ -550,7 +693,7 @@ def analyze_scan_with_segmentation(
         raise HTTPException(status_code=500, detail=f"Segmentation inference failed: {e}") from e
 
     mask_name = f"{scan.id}_mask.png"
-    out_path = os.path.join(RESULTS_DIR, mask_name)
+    out_path = os.path.join(_results_dir_for_scan(scan), mask_name)
     try:
         save_overlay(vis_image, seg, out_path)
     except Exception as e:
@@ -565,7 +708,7 @@ def analyze_scan_with_segmentation(
         "prediction": prediction,
         "confidence": round(float(conf_pct) / 100.0, 4),
         "mask_image": mask_b64,
-        "download_url": f"/uploads/results/{mask_name}",
+        "download_url": f"/uploads/results/{_scan_storage_kind(scan)}/{mask_name}",
     }
 
 
@@ -665,13 +808,25 @@ def run_analysis(payload: dict, db: Session = Depends(get_db), current = Depends
 
 @router.get("/recent")
 def recent_analyses(limit: int = 6, db: Session = Depends(get_db)):
-    # Join diagnoses -> scans -> report (latest diagnoses first)
-    q = db.query(Diagnosis).order_by(Diagnosis.id.desc()).limit(limit).all()
+    """Latest completed analyses from the database (real model outputs), newest first."""
+    lim = max(1, min(int(limit or 6), 24))
+    rows = (
+        db.query(Diagnosis)
+        .options(
+            joinedload(Diagnosis.scan).joinedload(MRIScan.patient),
+            joinedload(Diagnosis.scan).joinedload(MRIScan.doctor),
+            joinedload(Diagnosis.report),
+        )
+        .order_by(Diagnosis.analyzed_at.desc(), Diagnosis.id.desc())
+        .limit(lim)
+        .all()
+    )
     out = []
-    for d in q:
-        scan = db.query(MRIScan).filter(MRIScan.id == d.scan_id).first()
-        report = db.query(Report).filter(Report.diagnosis_id == d.id).first()
-        out.append(_serialize_analysis(d, report, scan))
+    for d in rows:
+        scan = d.scan
+        if not scan:
+            continue
+        out.append(_serialize_analysis(d, d.report, scan))
     return out
 
 
@@ -765,6 +920,7 @@ def get_patient_reports(
             continue
 
         file_name = os.path.basename(scan.file_path or "")
+        file_url = _uploads_url_from_abs_path(scan.file_path or "")
         reports_data.append({
             "report_id": report.id,
             "scan_id": scan.id,
@@ -781,7 +937,7 @@ def get_patient_reports(
             "summary": report.summary,
             "recommendation": report.recommendation,
             "file_name": file_name,
-            "file_url": f"/uploads/{file_name}" if file_name else None,
+            "file_url": file_url,
             "download_url": f"/reports/{report.id}" if report and (report.pdf_path or report.file_path) else None,
         })
 
@@ -828,47 +984,91 @@ def generate_segmentation_report_pdf_endpoint(
     display_name = (body.patient_name or patient.name or patient.email or f"Patient {patient.id}").strip()
     display_age = body.age if body.age is not None else patient.age
     age_str = str(display_age) if display_age is not None else "Not provided"
-    gender_str = (body.gender or "Not provided").strip()
-
     scan_root = _scan_modality_folder(scan)
-    try:
-        file_map = _build_file_map(scan_root)
-        _validate_file_map(file_map)
-        vis_image = load_mri_images(file_map)
-        image_prep = preprocess(np.ascontiguousarray(vis_image))
-        model, device, _ = get_brats_bundle_predictor()
-        seg, conf_pct = predict_segmentation_with_confidence(model, image_prep, device)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Segmentation inference failed: {e}") from e
+    use_current = bool(body.use_current_result)
+    if use_current:
+        if not body.current_prediction or not body.current_output_image_url or not body.current_probs:
+            raise HTTPException(status_code=400, detail="Missing current model result. Run View result first.")
+        label_counts: dict[str, int] = {}
+        for k, v in (body.current_probs or {}).items():
+            try:
+                label_counts[str(k)] = int(float(v))
+            except Exception:
+                continue
+        tumor_voxels = int(sum(v for k, v in label_counts.items() if str(k) != "0"))
+        tumor_flag = tumor_voxels > 0
+        try:
+            voxel_mm3 = voxel_volume_mm3_from_scan_folder(scan_root)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not read voxel spacing: {e}") from e
+        vol_mm3 = float(tumor_voxels * voxel_mm3)
+        vol_cm3 = float(vol_mm3 / 1000.0)
+        confidence_display = (
+            f"{float(body.current_confidence):.2f}"
+            if body.current_confidence is not None and math.isfinite(float(body.current_confidence))
+            else "N/A"
+        )
+        conf_for_db = (
+            float(body.current_confidence)
+            if body.current_confidence is not None and math.isfinite(float(body.current_confidence))
+            else None
+        )
+        location = "Model output image provided (location summary unavailable in this run)"
+        severity = "Low" if vol_cm3 < 5 else "Moderate" if vol_cm3 < 20 else "High"
+        metrics = {
+            "tumor_detected": tumor_flag,
+            "tumor_volume_cm3": vol_cm3,
+            "tumor_volume_mm3": vol_mm3,
+            "tumor_location": location,
+            "severity": severity,
+            "tumor_positive_voxels": tumor_voxels,
+            "label_voxel_counts": label_counts,
+        }
+    else:
+        try:
+            file_map = _build_file_map(scan_root)
+            _validate_file_map(file_map)
+            vis_image = load_mri_images(file_map)
+            image_prep = preprocess(np.ascontiguousarray(vis_image))
+            model, device, _ = get_brats_bundle_predictor()
+            seg, conf_pct = predict_segmentation_with_confidence(model, image_prep, device)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Segmentation inference failed: {e}") from e
 
-    confidence_display = f"{conf_pct:.2f}" if math.isfinite(conf_pct) else "N/A"
-    conf_for_db = conf_pct if math.isfinite(conf_pct) else None
-    vol_shape = tuple(int(x) for x in np.asarray(seg).shape)
-    try:
-        voxel_mm3 = voxel_volume_mm3_from_scan_folder(scan_root)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not read voxel spacing: {e}") from e
+        confidence_display = f"{conf_pct:.2f}" if math.isfinite(conf_pct) else "N/A"
+        conf_for_db = conf_pct if math.isfinite(conf_pct) else None
+        vol_shape = tuple(int(x) for x in np.asarray(seg).shape)
+        try:
+            voxel_mm3 = voxel_volume_mm3_from_scan_folder(scan_root)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not read voxel spacing: {e}") from e
 
-    try:
-        metrics = compute_tumor_metrics(seg, vol_shape, voxel_mm3)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not compute tumor metrics: {e}") from e
+        try:
+            metrics = compute_tumor_metrics(seg, vol_shape, voxel_mm3)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not compute tumor metrics: {e}") from e
 
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     overlay_name = f"report_{scan.id}_{ts}_overlay.png"
     mri_name = f"report_{scan.id}_{ts}_mri.png"
-    overlay_path = os.path.join(RESULTS_DIR, overlay_name)
-    mri_path = os.path.join(RESULTS_DIR, mri_name)
-    try:
-        save_overlay(vis_image, seg, overlay_path)
-        slice_idx = best_axial_slice_index(np.asarray(seg))
-        save_mri_axial_slice_png(vis_image, slice_idx, mri_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not export report images: {e}") from e
+    overlay_path = os.path.join(_results_dir_for_scan(scan), overlay_name)
+    mri_path = os.path.join(_results_dir_for_scan(scan), mri_name)
+    if use_current:
+        src_img = _abs_path_from_uploads_url(body.current_output_image_url)
+        if not src_img:
+            raise HTTPException(status_code=400, detail="Current result image not found on server.")
+        shutil.copy2(src_img, overlay_path)
+    else:
+        try:
+            save_overlay(vis_image, seg, overlay_path)
+            slice_idx = best_axial_slice_index(np.asarray(seg))
+            save_mri_axial_slice_png(vis_image, slice_idx, mri_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not export report images: {e}") from e
 
-    model_name = "MONAI BraTS SegResNet (same pipeline as POST /predict)"
+    model_name = body.current_model_version or "MONAI BraTS SegResNet (same pipeline as POST /predict)"
     tumor_flag = bool(metrics["tumor_detected"])
     vol_cm3 = float(metrics["tumor_volume_cm3"])
     vol_mm3 = float(metrics["tumor_volume_mm3"])
@@ -909,21 +1109,27 @@ def generate_segmentation_report_pdf_endpoint(
 
     template_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "templates"))
     pdf_name = f"{body.patient_id}_{ts}.pdf"
-    pdf_path = os.path.join(REPORTS_DIR, pdf_name)
+    pdf_path = os.path.join(_reports_dir_for_scan(scan), pdf_name)
 
     scan_date = scan.upload_date.isoformat() if scan.upload_date else datetime.utcnow().isoformat()
     scan_folder_label = os.path.basename((scan.file_path or "").rstrip(os.sep)) or str(scan.id)
 
-    run_generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    prediction = "Tumor Detected" if tumor_flag else "No Tumor Detected"
+    run_generated_at = datetime.now(ZoneInfo("Asia/Karachi")).strftime("%Y-%m-%d %H:%M")
+    if scan.upload_date:
+        scan_dt = scan.upload_date
+        if getattr(scan_dt, "tzinfo", None) is None:
+            scan_dt = scan_dt.replace(tzinfo=ZoneInfo("UTC"))
+        scan_date_display = scan_dt.astimezone(ZoneInfo("Asia/Karachi")).strftime("%Y-%m-%d %H:%M")
+    else:
+        scan_date_display = run_generated_at
+    prediction = body.current_prediction if use_current and body.current_prediction else ("Tumor Detected" if tumor_flag else "No Tumor Detected")
     jinja_ctx = {
         "generated_at": run_generated_at,
         "report_db_id": "pending",
         "patient_name": display_name,
         "patient_id": str(body.patient_id),
         "age": age_str,
-        "gender": gender_str,
-        "scan_date": scan_date,
+        "scan_date": scan_date_display,
         "model_name": model_name,
         "scan_folder_label": scan_folder_label,
         "prediction_label": prediction,
@@ -935,9 +1141,10 @@ def generate_segmentation_report_pdf_endpoint(
         "severity": severity,
         "confidence_score": confidence_display,
         "analysis_paragraph": analysis_paragraph,
+        "analysis_heading": "Analysis",
         "label_histogram": label_hist,
-        "mri_image_data_uri": _png_file_data_uri(mri_path),
-        "overlay_image_data_uri": _png_file_data_uri(overlay_path),
+        "mri_image_data_uri": _png_file_data_uri(mri_path) if os.path.isfile(mri_path) else None,
+        "overlay_image_data_uri": _image_file_data_uri(overlay_path),
         "conclusion_paragraph": conclusion_paragraph,
         "disclaimer_text": disclaimer_text,
     }
@@ -957,8 +1164,8 @@ def generate_segmentation_report_pdf_endpoint(
         "scan_date": scan_date,
         "generated_at_utc": run_generated_at,
         "label_voxel_counts": metrics.get("label_voxel_counts") or {},
-        "overlay_image": f"/uploads/results/{overlay_name}",
-        "reference_mri_png": f"/uploads/results/{mri_name}",
+        "overlay_image": f"/uploads/results/{_scan_storage_kind(scan)}/{overlay_name}",
+        "reference_mri_png": f"/uploads/results/{_scan_storage_kind(scan)}/{mri_name}",
     }
     meta_json = json.dumps(meta_obj)
 
@@ -987,7 +1194,7 @@ def generate_segmentation_report_pdf_endpoint(
         model_version=model_name[:250],
         model_meta=meta_json,
         result_payload=meta_json,
-        result_image_path=f"/uploads/results/{overlay_name}",
+        result_image_path=f"/uploads/results/{_scan_storage_kind(scan)}/{overlay_name}",
         analyzed_at=datetime.utcnow(),
     )
     db.add(diagnosis)

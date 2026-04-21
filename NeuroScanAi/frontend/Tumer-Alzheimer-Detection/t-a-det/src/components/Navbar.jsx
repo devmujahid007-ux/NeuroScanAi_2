@@ -6,7 +6,6 @@ import logo from "../assests/logo.png";
 const Navbar = () => {
   const { user, logout } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [resourcesOpen, setResourcesOpen] = useState(false);
   const [dashboardOpen, setDashboardOpen] = useState(false);
 
   const handleLogout = () => logout();
@@ -15,7 +14,6 @@ const Navbar = () => {
   useEffect(() => {
     function handler(e) {
       if (navRef.current && !navRef.current.contains(e.target)) {
-        setResourcesOpen(false);
         setDashboardOpen(false);
       }
     }
@@ -34,7 +32,7 @@ const Navbar = () => {
               {logo ? (
                 <img
                   src={logo}
-                  alt="NeuroScan AI"
+                  alt="NeuroScan"
                   className="h-10 w-auto object-contain"
                   onError={(e) => {
                     e.currentTarget.style.display = "none";
@@ -54,7 +52,7 @@ const Navbar = () => {
               )}
 
               <div className="flex flex-col leading-tight">
-                <span className="text-lg font-semibold text-slate-800">NeuroScan AI</span>
+                <span className="text-lg font-semibold text-slate-800">NeuroScan</span>
                 <span className="text-xs text-slate-400 -mt-1">
                   Brain Tumor & Alzheimer's Detection
                 </span>
@@ -75,49 +73,6 @@ const Navbar = () => {
             <Link to="/contact" className="text-sm font-medium text-slate-700 hover:text-slate-900">
               Contact Us
             </Link>
-
-            {/* Resources */}
-            <div className="relative">
-              <button
-                onClick={() => setResourcesOpen((s) => !s)}
-                className="inline-flex items-center gap-2 text-sm font-medium text-slate-700 hover:text-slate-900 focus:outline-none"
-                aria-haspopup="menu"
-                aria-expanded={resourcesOpen}
-              >
-                Resources
-                <svg
-                  className={`w-4 h-4 transform transition-transform ${
-                    resourcesOpen ? "rotate-180" : ""
-                  }`}
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path strokeWidth="2" d="M19 9l-7 7-7-7" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-
-              {resourcesOpen && (
-                <ul className="absolute right-0 mt-2 w-56 bg-white border rounded-lg shadow-lg py-2 z-20">
-                  <li>
-                    <Link to="/resources/docs" className="block px-4 py-2 text-sm hover:bg-slate-50">
-                      Documentation
-                    </Link>
-                  </li>
-                  <li>
-                    <Link to="/resources/papers" className="block px-4 py-2 text-sm hover:bg-slate-50">
-                      Research Papers
-                    </Link>
-                  </li>
-                  <li>
-                    <Link to="/resources/faq" className="block px-4 py-2 text-sm hover:bg-slate-50">
-                      FAQ
-                    </Link>
-                  </li>
-                </ul>
-              )}
-            </div>
 
             {/* Dashboard */}
             <div className="relative">

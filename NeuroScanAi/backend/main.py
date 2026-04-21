@@ -1,6 +1,8 @@
 import os
 import shutil
 import traceback
+import smtplib
+import ssl
 from uuid import uuid4
 
 import numpy as np
@@ -8,6 +10,9 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
+from pydantic import BaseModel, EmailStr, Field
+from email.message import EmailMessage
+from dotenv import load_dotenv
 from app.database.db import init_db
 from app.routers import auth, upload, users, analyses, stats, patients, mri_preview, reports_pdf
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +22,8 @@ from app.model_loader import load_model
 from app.preprocessing import load_mri_images, preprocess
 from app.inference import predict_segmentation_with_confidence
 from app.visualization import save_overlay
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=False)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -61,17 +68,20 @@ app.include_router(stats.router)
 app.include_router(patients.router)
 app.include_router(reports_pdf.router)
 
-REPORTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "reports"))
-os.makedirs(REPORTS_DIR, exist_ok=True)
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data"))
+SCANS_DIR = os.path.join(DATA_DIR, "scans")
+RESULTS_DIR = os.path.join(DATA_DIR, "results")
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")
+for _path in (DATA_DIR, SCANS_DIR, RESULTS_DIR, REPORTS_DIR):
+    os.makedirs(_path, exist_ok=True)
+for _kind in ("tumor", "alzheimer"):
+    os.makedirs(os.path.join(SCANS_DIR, _kind), exist_ok=True)
+    os.makedirs(os.path.join(RESULTS_DIR, _kind), exist_ok=True)
+    os.makedirs(os.path.join(REPORTS_DIR, _kind), exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=DATA_DIR), name="uploads")
 
-# Serve uploaded files.
-# Routers save MRI data/results under backend/uploads, so static mount must match.
-UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "uploads"))
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-
-# `/predict` pipeline writes overlays to backend/data/outputs.
-OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "outputs"))
+# `/predict` pipeline writes tumor overlays to backend/data/results/tumor.
+OUTPUT_DIR = os.path.join(RESULTS_DIR, "tumor")
 TEMP_UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "uploads"))
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
@@ -79,6 +89,81 @@ app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
 # Load segmentation model once for `/predict` endpoint.
 model, config, device = load_model()
+
+
+class ContactPayload(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    email: EmailStr
+    subject: str = Field(default="", max_length=200)
+    message: str = Field(..., min_length=1, max_length=5000)
+
+
+@app.post("/api/contact")
+async def contact_api(payload: ContactPayload):
+    smtp_user = (
+        os.getenv("SMTP_USER", "").strip()
+        or os.getenv("EMAIL_USER", "").strip()
+        or os.getenv("GMAIL_USER", "").strip()
+        or os.getenv("CONTACT_RECEIVER_EMAIL", "neuroscan148@gmail.com").strip()
+    )
+    smtp_password = (
+        os.getenv("SMTP_PASSWORD", "").strip()
+        or os.getenv("EMAIL_PASSWORD", "").strip()
+        or os.getenv("GMAIL_APP_PASSWORD", "").strip()
+    )
+    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "465"))
+    recipient = os.getenv("CONTACT_RECEIVER_EMAIL", "neuroscan148@gmail.com").strip()
+
+    if not smtp_user or not smtp_password:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Email service is not configured on server. Set SMTP_USER and SMTP_PASSWORD."},
+        )
+    smtp_password = smtp_password.replace(" ", "")
+
+    subject = payload.subject.strip() if payload.subject else "New contact message"
+    msg = EmailMessage()
+    msg["Subject"] = f"[NeuroScan Contact] {subject}"
+    msg["From"] = smtp_user
+    msg["To"] = recipient
+    msg["Reply-To"] = payload.email
+    msg.set_content(
+        f"New Contact Us form submission\n\n"
+        f"Name: {payload.name}\n"
+        f"Email: {payload.email}\n"
+        f"Subject: {subject}\n\n"
+        f"Message:\n{payload.message}\n"
+    )
+
+    try:
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ssl.create_default_context()) as server:
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+    except Exception:
+        # Fallback for providers that expect STARTTLS on 587 even when config says 465.
+        try:
+            with smtplib.SMTP(smtp_host, 587, timeout=20) as server:
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+        except Exception:
+            return JSONResponse(
+                status_code=502,
+                content={"error": "Failed to send email. Check SMTP credentials/app password and try again."},
+            )
+
+    return {"ok": True, "message": "Message sent successfully."}
 
 
 def _save_uploaded_file(file: UploadFile, modality: str) -> str:

@@ -106,7 +106,7 @@ export default function Results() {
     setExporting(true);
     setTimeout(() => {
       const text = `
-        NeuroScan AI — Analysis Report
+        NeuroScan — Analysis Report
         Report ID: ${report.id}
         Patient: ${report.patient.name} (${report.patient.patientId})
         Date: ${report.date}

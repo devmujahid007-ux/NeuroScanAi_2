@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState, useRef } from "react";
 import { Link } from "react-router-dom";
 
-import logo from "../assests/logo.png";
 import heroMRI from "../assests/heroMRI.jpg";
 import { getRecentAnalyses, streamAnalyses, absoluteUrl } from "../api";
 
@@ -56,7 +55,8 @@ export default function Home() {
   const recentAnalysisCards = useMemo(
     () =>
       (recentAnalyses || []).map((row) => {
-        const dateObj = row?.date ? new Date(row.date) : null;
+        const dateRaw = row?.analyzed_at || row?.date;
+        const dateObj = dateRaw ? new Date(dateRaw) : null;
         const dateLabel =
           dateObj && !Number.isNaN(dateObj.getTime()) ? dateObj.toLocaleString() : "Recent";
         const reportMatch =
@@ -164,17 +164,12 @@ export default function Home() {
       <section className="max-w-7xl mx-auto px-6 md:px-10 pt-8 md:pt-12">
         <div className="grid lg:grid-cols-2 gap-8 items-center">
           <div className="space-y-6">
-            <div className="inline-flex items-center gap-3 rounded-full bg-white border border-slate-200 px-4 py-2">
-              <img src={logo} alt="NeuroScan AI" className="w-8 h-8 object-contain" />
-              <span className="text-sm font-semibold text-slate-700">NeuroScan AI Platform</span>
-            </div>
-
             <div>
               <h1 className="text-3xl md:text-5xl font-bold text-slate-900 leading-tight">
                 Clinical-ready MRI workflow for Brain Tumor and Alzheimer&apos;s reporting
               </h1>
               <p className="mt-4 text-slate-600 max-w-2xl">
-                From patient uploads to doctor review and PDF delivery, NeuroScan AI provides a single workflow for analysis,
+                From patient uploads to doctor review and PDF delivery, NeuroScan provides a single workflow for analysis,
                 reporting, and secure handoff between care teams and patients.
               </p>
             </div>
@@ -182,9 +177,6 @@ export default function Home() {
             <div className="flex flex-wrap gap-3">
               <Link to="/login" className="px-5 py-3 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700">
                 Open Platform
-              </Link>
-              <Link to="/contact" className="px-5 py-3 rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-50">
-                Request Demo
               </Link>
             </div>
 

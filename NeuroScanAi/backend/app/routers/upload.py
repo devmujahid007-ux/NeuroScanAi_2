@@ -7,22 +7,26 @@ import types
 import zipfile
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 from app.security.jwt import role_required
 from app.database.db import SessionLocal
-from app.models.medical import MRIScan, ScanStatus
+from app.models.medical import MRIScan, ScanStatus, Diagnosis, Report
 from app.models.user import User
 from app.schemas.medical import MRIScanOut
 from app.ml.monai_preprocess import _build_file_map, _validate_file_map
 from pydantic import BaseModel
 
-UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads"))
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-SCANS_UPLOAD_DIR = os.path.join(UPLOAD_DIR, "scans")
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+os.makedirs(DATA_DIR, exist_ok=True)
+UPLOAD_DIR = DATA_DIR
+SCANS_UPLOAD_DIR = os.path.join(DATA_DIR, "scans")
 os.makedirs(SCANS_UPLOAD_DIR, exist_ok=True)
+for _kind in ("tumor", "alzheimer"):
+    os.makedirs(os.path.join(SCANS_UPLOAD_DIR, _kind), exist_ok=True)
 MRI_MODALITY_ORDER = ("t1c", "t1n", "t2f", "t2w")
 ALLOWED_MRI_EXTS = {".dcm", ".nii", ".nii.gz"}
 MAX_ZIP_BYTES = int(os.getenv("MRI_ZIP_MAX_BYTES", str(500 * 1024 * 1024)))
@@ -144,8 +148,80 @@ def _use_zip_upload(mri_zip: Optional[UploadFile]) -> bool:
         return False
 
 
-def _save_modalities_to_scan_dir(scan_id: int, files_by_modality: dict[str, UploadFile]) -> str:
-    scan_dir = os.path.join(SCANS_UPLOAD_DIR, str(scan_id))
+def _scan_storage_kind(scan_kind: str | None) -> str:
+    return "alzheimer" if (scan_kind or "").lower() == "alzheimer" else "tumor"
+
+
+def _scan_storage_dir(scan_id: int, scan_kind: str | None) -> str:
+    return os.path.join(SCANS_UPLOAD_DIR, _scan_storage_kind(scan_kind), str(scan_id))
+
+
+def _unlink_if_under_data(path: str | None) -> None:
+    """Remove a file or directory only if it lives under ``DATA_DIR`` (safety)."""
+    if not path or not str(path).strip():
+        return
+    try:
+        p = os.path.abspath(str(path).strip())
+        root = os.path.abspath(DATA_DIR)
+        if p != root and not p.startswith(root + os.sep):
+            return
+        if os.path.isfile(p):
+            os.remove(p)
+        elif os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def _abs_path_from_public_ref(ref: str | None) -> str | None:
+    """Map ``/uploads/...`` or ``/outputs/...`` (or absolute paths under data) to a filesystem path."""
+    if not ref or not str(ref).strip():
+        return None
+    raw = str(ref).strip()
+    if raw.startswith("http://") or raw.startswith("https://"):
+        raw = (urlparse(raw).path or "").strip() or raw
+    if os.path.isabs(raw):
+        p = os.path.abspath(raw)
+        root = os.path.abspath(DATA_DIR)
+        if p == root or p.startswith(root + os.sep):
+            return p
+        return None
+    parsed = raw if raw.startswith("/") else f"/{raw}"
+    if parsed.startswith("/uploads/"):
+        rel = parsed[len("/uploads/") :].lstrip("/").replace("/", os.sep)
+        return os.path.abspath(os.path.join(DATA_DIR, rel))
+    if parsed.startswith("/outputs/"):
+        rel = parsed[len("/outputs/") :].lstrip("/").replace("/", os.sep)
+        return os.path.abspath(os.path.join(DATA_DIR, "results", "tumor", rel))
+    return None
+
+
+def _unlink_public_ref(ref: str | None) -> None:
+    p = _abs_path_from_public_ref(ref)
+    if p:
+        _unlink_if_under_data(p)
+
+
+def _unlink_diagnosis_result_assets(dx: Diagnosis) -> None:
+    """Remove on-disk result images referenced by a diagnosis (paths or /uploads/... URLs)."""
+    _unlink_public_ref(dx.result_image_path)
+    for text in (dx.result_payload, dx.model_meta):
+        if not text:
+            continue
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        for k in ("overlay_image", "reference_mri_png", "input_image"):
+            v = obj.get(k)
+            if isinstance(v, str):
+                _unlink_public_ref(v)
+
+
+def _save_modalities_to_scan_dir(scan_id: int, files_by_modality: dict[str, UploadFile], scan_kind: str = "mri") -> str:
+    scan_dir = _scan_storage_dir(scan_id, scan_kind)
     if os.path.isdir(scan_dir):
         shutil.rmtree(scan_dir)
     os.makedirs(scan_dir, exist_ok=True)
@@ -255,9 +331,10 @@ def _resolve_modalities_from_extracted_zip(root: str) -> dict[str, str]:
     )
 
 
-def _save_modalities_from_zip(scan_id: int, upload: UploadFile) -> str:
+def _save_modalities_from_zip(scan_id: int, upload: UploadFile, scan_kind: str = "mri") -> str:
     """Extract ZIP, resolve four NIfTI volumes, copy into flat scan folder for MONAI."""
-    scan_dir = os.path.join(SCANS_UPLOAD_DIR, str(scan_id))
+    kind_root = os.path.join(SCANS_UPLOAD_DIR, _scan_storage_kind(scan_kind))
+    scan_dir = _scan_storage_dir(scan_id, scan_kind)
     if os.path.isdir(scan_dir):
         shutil.rmtree(scan_dir)
     extract_root = os.path.join(scan_dir, "__extract__")
@@ -300,7 +377,7 @@ def _save_modalities_from_zip(scan_id: int, upload: UploadFile) -> str:
 
         # Copy into a sibling staging dir first — ``found`` paths live under ``scan_dir/__extract__``,
         # so we must not ``rmtree(scan_dir)`` before copying (that caused 500s / broken uploads).
-        staging = os.path.join(SCANS_UPLOAD_DIR, f"{scan_id}.staging")
+        staging = os.path.join(kind_root, f"{scan_id}.staging")
         if os.path.isdir(staging):
             shutil.rmtree(staging, ignore_errors=True)
         os.makedirs(staging, exist_ok=True)
@@ -332,10 +409,10 @@ def _save_modalities_from_zip(scan_id: int, upload: UploadFile) -> str:
             shutil.rmtree(scan_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Invalid ZIP file: {e}") from e
     finally:
-        staging_left = os.path.join(SCANS_UPLOAD_DIR, f"{scan_id}.staging")
+        staging_left = os.path.join(kind_root, f"{scan_id}.staging")
         if os.path.isdir(staging_left):
             shutil.rmtree(staging_left, ignore_errors=True)
-        extract_gone = os.path.join(SCANS_UPLOAD_DIR, str(scan_id), "__extract__")
+        extract_gone = os.path.join(_scan_storage_dir(scan_id, scan_kind), "__extract__")
         if os.path.isdir(extract_gone):
             shutil.rmtree(extract_gone, ignore_errors=True)
 
@@ -435,9 +512,9 @@ def upload_mri(
     db.add(scan)
     db.flush()
     if use_zip:
-        fpath = _save_modalities_from_zip(scan.id, mri_zip)
+        fpath = _save_modalities_from_zip(scan.id, mri_zip, "mri")
     else:
-        fpath = _save_modalities_to_scan_dir(scan.id, files_by_modality)
+        fpath = _save_modalities_to_scan_dir(scan.id, files_by_modality, "mri")
     scan.file_path = fpath
     db.commit()
     db.refresh(scan)
@@ -495,7 +572,7 @@ def upload_patient_mri_zip_only(
     )
     db.add(scan)
     db.flush()
-    fpath = _save_modalities_from_zip(scan.id, zip_upload)
+    fpath = _save_modalities_from_zip(scan.id, zip_upload, "mri")
     scan.file_path = fpath
     db.commit()
     db.refresh(scan)
@@ -563,7 +640,7 @@ def upload_alzheimer_patient_image(
     db.add(scan)
     db.flush()
 
-    scan_dir = os.path.join(SCANS_UPLOAD_DIR, str(scan.id))
+    scan_dir = _scan_storage_dir(scan.id, "alzheimer")
     if os.path.isdir(scan_dir):
         shutil.rmtree(scan_dir, ignore_errors=True)
     os.makedirs(scan_dir, exist_ok=True)
@@ -665,14 +742,56 @@ def get_patient_scans(
     return out
 
 
+@router.delete("/patient-scans/{scan_id}")
+def delete_patient_tumor_scan_request(
+    scan_id: int,
+    db: Session = Depends(get_db),
+    current=Depends(role_required("patient")),
+):
+    """
+    Remove a tumor (MRI) request for the logged-in patient: diagnoses, reports, PDFs,
+    result images, and the stored scan folder. The case disappears from the doctor dashboard as well.
+    Alzheimer uploads are not accepted here (UI uses this for tumor only).
+    """
+    scan = db.query(MRIScan).filter(MRIScan.id == scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.patient_id is None or int(scan.patient_id) != int(current.id):
+        raise HTTPException(status_code=403, detail="You can only delete your own scans.")
+    sk = (scan.scan_kind or "mri").lower()
+    if sk == "alzheimer":
+        raise HTTPException(status_code=403, detail="This action only applies to tumor (MRI) requests.")
+
+    diagnoses = db.query(Diagnosis).filter(Diagnosis.scan_id == scan_id).all()
+    for dx in diagnoses:
+        for rep in db.query(Report).filter(Report.diagnosis_id == dx.id).all():
+            _unlink_if_under_data(rep.pdf_path)
+            _unlink_if_under_data(rep.file_path)
+            db.delete(rep)
+        _unlink_diagnosis_result_assets(dx)
+        db.delete(dx)
+
+    scan_dir = _scan_storage_dir(scan.id, scan.scan_kind)
+    if os.path.isdir(scan_dir):
+        shutil.rmtree(scan_dir, ignore_errors=True)
+    kind_root = os.path.join(SCANS_UPLOAD_DIR, _scan_storage_kind(scan.scan_kind))
+    staging = os.path.join(kind_root, f"{scan.id}.staging")
+    if os.path.isdir(staging):
+        shutil.rmtree(staging, ignore_errors=True)
+
+    _unlink_if_under_data((scan.file_path or "").strip())
+
+    db.delete(scan)
+    db.commit()
+    return {"ok": True, "id": scan_id}
+
+
 @router.get("/doctor-requests")
 def get_doctor_requests(
     db: Session = Depends(get_db),
     current = Depends(role_required("doctor"))
 ):
     """Get all MRI scan requests for the clinic doctor workflow."""
-    from app.models.medical import Diagnosis, Report
-    
     scans = (
         db.query(MRIScan)
         .options(joinedload(MRIScan.patient), joinedload(MRIScan.doctor))
@@ -785,7 +904,7 @@ def replace_patient_scan_file(
         "t2w": t2w,
     }
     _validate_all_modalities_present(files_by_modality)
-    fpath = _save_modalities_to_scan_dir(scan.id, files_by_modality)
+    fpath = _save_modalities_to_scan_dir(scan.id, files_by_modality, scan.scan_kind)
 
     scan.file_path = fpath
     db.add(scan)
@@ -796,5 +915,5 @@ def replace_patient_scan_file(
         "ok": True,
         "scan_id": scan.id,
         "file_name": os.path.basename(fpath),
-        "file_url": f"/uploads/{os.path.basename(fpath)}",
+        "file_url": _public_uploads_url(fpath),
     }

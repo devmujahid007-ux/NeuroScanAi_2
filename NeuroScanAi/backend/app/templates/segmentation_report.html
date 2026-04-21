@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
  <meta charset="utf-8"/>
-  <title>NeuroScan AI — Segmentation Report</title>
+  <title>NeuroScan — Segmentation Report</title>
   <style>
     @page { size: A4; margin: 18mm; }
     body { font-family: DejaVu Sans, Helvetica, Arial, sans-serif; font-size: 11pt; color: #1a1a1a; }
@@ -20,7 +20,7 @@
   </style>
 </head>
 <body>
-  <h1>Brain MRI — AI Segmentation Report</h1>
+  <h1>Brain MRI — Segmentation Report</h1>
   <p class="muted">Generated {{ generated_at }} · Report ID {{ report_db_id }}</p>
 
   <h2>Patient information</h2>
@@ -28,15 +28,7 @@
     <tr><td class="k">Name</td><td>{{ patient_name }}</td></tr>
     <tr><td class="k">Patient ID</td><td>{{ patient_id }}</td></tr>
     <tr><td class="k">Age</td><td>{{ age }}</td></tr>
-    <tr><td class="k">Sex / gender</td><td>{{ gender }}</td></tr>
     <tr><td class="k">Scan date</td><td>{{ scan_date }}</td></tr>
-  </table>
-
-  <h2>Scan details</h2>
-  <table class="meta">
-    <tr><td class="k">Modality</td><td>Multiparametric brain MRI (registered volumes; BraTS-style modalities)</td></tr>
-    <tr><td class="k">AI model</td><td>{{ model_name }}</td></tr>
-    <tr><td class="k">Scan folder</td><td>{{ scan_folder_label }}</td></tr>
   </table>
 
   <h2>Model results (this report run)</h2>
@@ -58,7 +50,7 @@
     <p><strong>Mean class confidence (model internal):</strong> {% if confidence_score == 'N/A' %}N/A{% else %}{{ confidence_score }}%{% endif %}.</p>
   </div>
 
-  <h2>AI analysis</h2>
+  <h2>Analysis</h2>
   <div class="box">
     <p>{{ analysis_paragraph }}</p>
     <p class="muted">Class histogram (voxel counts by discrete label): {{ label_histogram }}</p>
@@ -78,13 +70,5 @@
     {% endif %}
   </div>
 
-  <h2>Conclusion</h2>
-  <div class="box">
-    <p>{{ conclusion_paragraph }}</p>
-  </div>
-
-  <div class="disclaimer">
-    <strong>Important:</strong> {{ disclaimer_text }}
-  </div>
 </body>
 </html>

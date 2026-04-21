@@ -318,6 +318,28 @@ export async function viewModelResult(scanId) {
   return res.json();
 }
 
+export async function viewAlzheimerLocalResult(scanId, imageFile) {
+  const fd = new FormData();
+  fd.append("scan_id", String(scanId));
+  fd.append("image", imageFile);
+  const res = await fetch(`${BASE_URL}/api/analyses/alz-view-local`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+    body: fd,
+  });
+  if (!res.ok) {
+    let detail = "View result failed";
+    try {
+      const body = await res.json();
+      detail = parseFastApiDetail(body) || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 function appendMriModalities(formData, filesByModality) {
   for (const modality of MRI_MODALITIES) {
     const file = filesByModality?.[modality];
@@ -495,6 +517,27 @@ export async function sendScanToDoctor(scanId, doctorId) {
 export async function getPatientScans() {
   const res = await fetch(`${BASE_URL}/mri/patient-scans`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to load patient scans");
+  return res.json();
+}
+
+/** Remove a tumor (MRI) request for the patient and doctor (DB + files). Alzheimer scans are rejected by the API. */
+export async function deletePatientTumorScan(scanId) {
+  const id = Number(scanId);
+  if (!id) throw new Error("Invalid scan");
+  const res = await fetch(`${BASE_URL}/mri/patient-scans/${id}`, {
+    method: "DELETE",
+    headers: authBearerHeaders(),
+  });
+  if (!res.ok) {
+    let detail = "Could not delete request";
+    try {
+      const body = await res.json();
+      detail = parseFastApiDetail(body) || detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 

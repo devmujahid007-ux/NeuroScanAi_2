@@ -1,6 +1,4 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
-import LogoutButton from "../components/LogoutButton";
 import {
   createDoctor,
   createPatient,
@@ -85,6 +83,10 @@ export default function AdminDashboard() {
       setError("Name and email are required.");
       return;
     }
+    if (!form.password || String(form.password).length < 6) {
+      setError("Password is required and must be at least 6 characters so the user can sign in.");
+      return;
+    }
     try {
       setSubmitting(true);
       setError(null);
@@ -95,7 +97,7 @@ export default function AdminDashboard() {
           name: form.name.trim(),
           email: form.email.trim(),
           phone: form.phone.trim() || null,
-          password: form.password || undefined,
+          password: form.password,
         });
         const temp = result?.temporary_password ? ` Temporary password: ${result.temporary_password}` : "";
         setNotice(`Doctor added successfully.${temp}`);
@@ -105,8 +107,9 @@ export default function AdminDashboard() {
           email: form.email.trim(),
           phone: form.phone.trim() || null,
           age: form.age !== "" ? Number(form.age) : null,
+          password: form.password,
         });
-        setNotice("Patient added successfully.");
+        setNotice("Patient added successfully. They can sign in with this email and password.");
       }
 
       setForm(initialForm);
@@ -150,9 +153,6 @@ export default function AdminDashboard() {
           </p>
         </div>
         <div className="flex gap-3 items-center">
-          <Link to="/" className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border hover:bg-slate-50">
-            Home
-          </Link>
           <button
             type="button"
             onClick={loadData}
@@ -160,7 +160,6 @@ export default function AdminDashboard() {
           >
             Refresh
           </button>
-          <LogoutButton />
         </div>
       </div>
 
@@ -224,6 +223,7 @@ export default function AdminDashboard() {
               onChange={(e) => updateForm("email", e.target.value)}
               className="w-full px-3 py-2 border rounded-lg"
               placeholder="user@email.com"
+              autoComplete="off"
             />
           </div>
           <div>
@@ -248,22 +248,25 @@ export default function AdminDashboard() {
               />
             </div>
           ) : (
-            <div>
-              <label className="text-sm text-slate-600 block mb-1">Password (optional)</label>
-              <input
-                type="text"
-                value={form.password}
-                onChange={(e) => updateForm("password", e.target.value)}
-                className="w-full px-3 py-2 border rounded-lg"
-                placeholder="Auto-generated if empty"
-              />
-            </div>
+            <div className="hidden lg:block" aria-hidden="true" />
           )}
-          <div className="flex items-end">
+          <div>
+            <label className="text-sm text-slate-600 block mb-1">Password</label>
+            <input
+              type="password"
+              value={form.password}
+              onChange={(e) => updateForm("password", e.target.value)}
+              className="w-full px-3 py-2 border rounded-lg"
+              placeholder="At least 6 characters"
+              autoComplete="new-password"
+            />
+            <p className="text-xs text-slate-500 mt-1">User signs in with this email and password.</p>
+          </div>
+          <div className="flex items-end md:col-span-2 lg:col-span-3 lg:justify-end">
             <button
               type="submit"
               disabled={submitting}
-              className="w-full px-4 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50"
+              className="w-full md:w-auto min-w-[200px] px-4 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50"
             >
               {submitting ? "Saving..." : "Add User"}
             </button>

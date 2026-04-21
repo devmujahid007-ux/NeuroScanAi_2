@@ -17,6 +17,12 @@ from app.security.jwt import get_current_user
 from app.ml.volume_io import collect_files_for_scan_download, get_preview_png, load_volume_and_shape
 
 router = APIRouter(prefix="/mri", tags=["MRI"])
+DATA_SCANS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "data", "scans")
+)
+LEGACY_SCANS_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "scans")
+)
 
 
 def get_db():
@@ -36,6 +42,46 @@ def _can_access_scan(scan: MRIScan, user: User) -> bool:
     if role == "doctor" and scan.doctor_id == user.id:
         return True
     return False
+
+
+def _resolve_scan_disk_path(scan: MRIScan) -> str:
+    raw = (scan.file_path or "").strip()
+    if raw and (os.path.isfile(raw) or os.path.isdir(raw)):
+        return raw
+
+    kind = "alzheimer" if (getattr(scan, "scan_kind", "") or "").lower() == "alzheimer" else "tumor"
+    candidates = [
+        os.path.join(DATA_SCANS_DIR, kind, str(scan.id)),   # new separated layout
+        os.path.join(DATA_SCANS_DIR, str(scan.id)),         # transitional layout
+        os.path.join(LEGACY_SCANS_DIR, str(scan.id)),       # legacy uploads layout
+    ]
+
+    for scan_dir in candidates:
+        if not os.path.isdir(scan_dir):
+            continue
+        if raw:
+            base = os.path.basename(raw)
+            if base:
+                candidate = os.path.join(scan_dir, base)
+                if os.path.isfile(candidate):
+                    return candidate
+        return scan_dir
+
+    # Legacy DB path remap fallback (e.g., .../uploads/scans/<id>/...)
+    if raw:
+        normalized = raw.replace("\\", "/")
+        marker = "/uploads/scans/"
+        idx = normalized.lower().find(marker)
+        if idx != -1:
+            suffix = normalized[idx + len(marker):].lstrip("/")
+            remapped_candidates = [
+                os.path.join(DATA_SCANS_DIR, kind, suffix),
+                os.path.join(DATA_SCANS_DIR, suffix),
+            ]
+            for candidate in remapped_candidates:
+                if os.path.isfile(candidate) or os.path.isdir(candidate):
+                    return candidate
+    return raw
 
 
 @router.get("/scan/{scan_id}/preview-meta")
@@ -100,7 +146,7 @@ def download_scan_volume(
         raise HTTPException(status_code=404, detail="Scan not found")
     if not _can_access_scan(scan, current):
         raise HTTPException(status_code=403, detail="Not allowed to download this scan")
-    path = scan.file_path
+    path = _resolve_scan_disk_path(scan)
     if not path:
         raise HTTPException(status_code=404, detail="Scan file missing on server")
     if os.path.isdir(path):
