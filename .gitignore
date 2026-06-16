@@ -1,9 +1,18 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
 # Node
 node_modules/
 
-venv/
-node_modules/
-__pycache__/
+# Build
+build/
+build-codex/
+dist/
+
 *.pth
 *.pt
 *.nii
@@ -16,12 +25,6 @@ __pycache__/
 NeuroScanAi/backend/data/
 NeuroScanAi/backend/reports/
 
-# Ignore environment
-.venv/
-
-# Python
-__pycache__/
-*.pyc
 
 # AI / Medical
 *.pth
@@ -30,9 +33,12 @@ __pycache__/
 *.nii.gz
 *.h5
 
-# Uploads / Data
+# Large datasets
+datasets/
+BraTS/
+data/
 uploads/
-backend/uploads/
+
 *.nii.gz
 
 # Data
@@ -47,14 +53,6 @@ backend/uploads/
 
 # Editor
 .vscode/
-
-# Build
-build/
-dist/
-
-# Build
-build/
-build-codex/
 
 # Zip
 *.zip

@@ -5,6 +5,7 @@ import {
   absoluteUrl,
   downloadPatientScanBlob,
   fetchMriPreviewBlob,
+  finalizeReportPdf,
   generateSegmentationReport,
   getDoctorRequests,
   getMriPreviewMeta,
@@ -37,7 +38,7 @@ function DoctorReportHistoryBlock({
       </p>
       {reportList.length === 0 ? (
         <p className="text-sm text-slate-500 bg-slate-50 rounded-lg px-3 py-4 border border-slate-100">
-          No reports yet. Run <strong>Analyze stored scan</strong>, then <strong>Generate report</strong> — the PDF opens in a new tab and appears here.
+          No reports yet. Run <strong>View result</strong>, then <strong>Generate report</strong> — after you confirm the text and download the PDF, it appears here.
         </p>
       ) : (
         <ul className="space-y-3">
@@ -304,6 +305,11 @@ export default function DoctorDashboardPage() {
   /** Which tumor inference is running: server scan vs local four-file /predict */
   const [inferenceBusyKind, setInferenceBusyKind] = useState(null);
   const [reportList, setReportList] = useState([]);
+  /**
+   * After first "Generate report", holds draft text until the doctor clicks again to build the PDF.
+   * @type {{ reportId: number, scanId: number, kind: 'tumor'|'alzheimer', findings: string, analysis: string, probs: string } | null}
+   */
+  const [reportDraft, setReportDraft] = useState(null);
 
   /** All four BraTS modalities chosen on disk — enables live ``/predict`` (View result) vs server pipeline. */
   const tumorFourModalityReady = useMemo(
@@ -376,6 +382,21 @@ export default function DoctorDashboardPage() {
   useEffect(() => {
     loadRequests();
   }, []);
+
+  useEffect(() => {
+    setReportDraft(null);
+  }, [doctorModule]);
+
+  useEffect(() => {
+    if (!workflowScanId) {
+      setReportDraft(null);
+      return;
+    }
+    setReportDraft((d) => {
+      if (!d) return null;
+      return Number(d.scanId) === Number(workflowScanId) ? d : null;
+    });
+  }, [workflowScanId]);
 
   const closeMriViewer = useCallback(() => setMriViewer(null), []);
 
@@ -533,10 +554,39 @@ export default function DoctorDashboardPage() {
       setError("Could not resolve patient for this scan.");
       return;
     }
+
+    const draftForThisScan =
+      reportDraft && Number(reportDraft.scanId) === id ? reportDraft : null;
+
     try {
       setAnalyzingScans((prev) => new Set(prev).add(id));
       setError(null);
-      const { reportId } = await generateSegmentationReport({
+
+      if (draftForThisScan) {
+        const finalizePayload = {
+          report_id: draftForThisScan.reportId,
+          findings_paragraph: draftForThisScan.findings,
+          analysis_paragraph: draftForThisScan.analysis,
+        };
+        if (draftForThisScan.kind === "alzheimer") {
+          finalizePayload.probs_paragraph = draftForThisScan.probs;
+        }
+        await finalizeReportPdf(finalizePayload);
+        await loadRequests({ quiet: true });
+        await loadReportList();
+        const dlId = draftForThisScan.reportId;
+        const url = reportPdfOpenUrl(dlId, { download: true });
+        if (url) window.open(url, "_blank", "noopener,noreferrer");
+        setUploadNotice(
+          "PDF saved on the server and download started. Use Report history below to send it to the patient when ready."
+        );
+        setReportDraft(null);
+        setPdfUnlockedScanId(null);
+        setModelView(null);
+        return;
+      }
+
+      const gen = await generateSegmentationReport({
         scan_id: id,
         patient_id: req.patient_id,
         patient_name: req.patient?.name || null,
@@ -548,23 +598,31 @@ export default function DoctorDashboardPage() {
         current_probs: modelView?.probs || null,
         current_output_image_url: modelView?.output_image_url || null,
         current_model_version: modelView?.model_version || null,
+        skip_pdf: true,
       });
 
-      const refreshed = await loadRequests({ quiet: true });
-      const row = refreshed?.find((r) => r.id === id);
       const resolvedReportId =
-        reportId != null && reportId !== "" ? Number(reportId) : row?.diagnosis?.report?.id ?? null;
+        gen.reportId != null && gen.reportId !== "" ? Number(gen.reportId) : null;
 
+      await loadRequests({ quiet: true });
       await loadReportList();
-      if (resolvedReportId) {
-        const url = reportPdfOpenUrl(resolvedReportId, { download: false });
-        if (url) window.open(url, "_blank", "noopener,noreferrer");
+
+      if (!resolvedReportId) {
+        setError("Report draft was created but the server did not return a report id.");
+        return;
       }
+
+      setReportDraft({
+        reportId: resolvedReportId,
+        scanId: id,
+        kind: doctorModule === "alzheimer" ? "alzheimer" : "tumor",
+        findings: gen.findings_paragraph ?? "",
+        analysis: gen.analysis_paragraph ?? "",
+        probs: gen.probs_paragraph ?? "",
+      });
       setUploadNotice(
-        "Report generated successfully and saved on the server. The PDF opened in a new tab — use Reports below to view, download, or send to the patient."
+        "Review and edit the report text in the form below. When it is correct, click the same button again to build and download the PDF."
       );
-      setPdfUnlockedScanId(null);
-      setModelView(null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -914,11 +972,67 @@ export default function DoctorDashboardPage() {
                 }
                 className="flex-1 min-w-[160px] px-4 py-3 rounded-xl bg-blue-600 text-white font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               >
-                {analyzingScans.has(Number(workflowScanId)) ? "Generating…" : "Generate report (PDF)"}
+                {analyzingScans.has(Number(workflowScanId))
+                  ? reportDraft && Number(reportDraft.scanId) === Number(workflowScanId)
+                    ? "Building PDF…"
+                    : "Generating…"
+                  : reportDraft && Number(reportDraft.scanId) === Number(workflowScanId)
+                  ? "Download report (PDF)"
+                  : "Generate report (PDF)"}
               </button>
             </div>
+
+            {reportDraft && Number(reportDraft.scanId) === Number(workflowScanId) ? (
+              <div className="mt-5 rounded-xl border border-blue-200 bg-blue-50/50 p-4 md:p-5 space-y-4">
+                <h3 className="text-sm font-semibold text-slate-900">Review report (editable)</h3>
+                <p className="text-xs text-slate-600">
+                  Update any details below, then click <strong>Download report (PDF)</strong> to save the PDF on the server
+                  and download it.
+                </p>
+                <div>
+                  <label htmlFor="doctor-report-findings" className="block text-xs font-medium text-slate-700 mb-1">
+                    Findings
+                  </label>
+                  <textarea
+                    id="doctor-report-findings"
+                    value={reportDraft.findings}
+                    onChange={(e) => setReportDraft((d) => (d ? { ...d, findings: e.target.value } : d))}
+                    rows={5}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="doctor-report-analysis" className="block text-xs font-medium text-slate-700 mb-1">
+                    Analysis
+                  </label>
+                  <textarea
+                    id="doctor-report-analysis"
+                    value={reportDraft.analysis}
+                    onChange={(e) => setReportDraft((d) => (d ? { ...d, analysis: e.target.value } : d))}
+                    rows={5}
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                {reportDraft.kind === "alzheimer" ? (
+                  <div>
+                    <label htmlFor="doctor-report-probs" className="block text-xs font-medium text-slate-700 mb-1">
+                      Class probabilities (shown in PDF)
+                    </label>
+                    <textarea
+                      id="doctor-report-probs"
+                      value={reportDraft.probs}
+                      onChange={(e) => setReportDraft((d) => (d ? { ...d, probs: e.target.value } : d))}
+                      rows={3}
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <p className="text-xs text-slate-600">
-              For Tumor, generate report is enabled after View result and uses the current model result.
+              For Tumor, generate report is enabled after View result and uses the current model result. First click
+              prepares editable text; the second click builds and downloads the PDF.
             </p>
           </div>
 

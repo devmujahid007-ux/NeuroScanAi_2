@@ -275,7 +275,48 @@ export async function generateSegmentationReport(payload) {
   const data = await res.json();
   const reportId = data.report_id != null ? data.report_id : null;
   const message = data.message != null ? data.message : null;
-  return { reportId, message };
+  return {
+    reportId,
+    message,
+    pdfPending: Boolean(data.pdf_pending),
+    findings_paragraph: data.findings_paragraph != null ? String(data.findings_paragraph) : null,
+    analysis_paragraph: data.analysis_paragraph != null ? String(data.analysis_paragraph) : null,
+    conclusion_paragraph: data.conclusion_paragraph != null ? String(data.conclusion_paragraph) : null,
+    probs_paragraph: data.probs_paragraph != null ? String(data.probs_paragraph) : null,
+    disclaimer_text: data.disclaimer_text != null ? String(data.disclaimer_text) : null,
+    scan_kind: data.scan_kind != null ? String(data.scan_kind) : null,
+  };
+}
+
+/**
+ * Renders the PDF on the server after the doctor edits draft text from generate-report (skip_pdf).
+ * @param {{ report_id: number, findings_paragraph: string, analysis_paragraph: string, probs_paragraph?: string|null }} payload
+ */
+export async function finalizeReportPdf(payload) {
+  const body = {
+    report_id: Number(payload.report_id),
+    findings_paragraph: payload.findings_paragraph,
+    analysis_paragraph: payload.analysis_paragraph,
+  };
+  if (payload.probs_paragraph !== undefined) {
+    body.probs_paragraph = payload.probs_paragraph;
+  }
+  const res = await fetch(`${BASE_URL}/api/finalize-report-pdf`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let msg = "Failed to finalize report PDF";
+    try {
+      const errBody = await res.json();
+      msg = parseFastApiDetail(errBody) || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  return res.json();
 }
 
 export async function sendReportToPatient(reportId, patientId) {

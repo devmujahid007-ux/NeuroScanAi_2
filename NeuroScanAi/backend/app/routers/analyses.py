@@ -72,6 +72,20 @@ class GenerateReportBody(BaseModel):
     current_probs: dict[str, float] | dict[str, int] | None = None
     current_output_image_url: str | None = None
     current_model_version: str | None = None
+    skip_pdf: bool = Field(
+        False,
+        description="If true, save diagnosis/report but omit PDF until POST /api/finalize-report-pdf (web review step).",
+    )
+
+
+class FinalizeReportPdfBody(BaseModel):
+    report_id: int
+    findings_paragraph: str
+    analysis_paragraph: str
+    probs_paragraph: str | None = Field(
+        None,
+        description="Alzheimer PDF only: class probabilities line; optional (rebuilt from stored meta if omitted).",
+    )
 
 
 class SendReportBody(BaseModel):
@@ -495,19 +509,22 @@ def _generate_alzheimer_report_pdf(
 
     jinja_ctx["report_db_id"] = str(report.id)
 
-    try:
-        render_segmentation_report_pdf(
-            jinja_ctx,
-            template_dir=template_dir,
-            template_name="alzheimer_report.html",
-            output_path=pdf_path,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF rendering failed: {e}") from e
+    skip_pdf = bool(body.skip_pdf)
+    if not skip_pdf:
+        try:
+            render_segmentation_report_pdf(
+                jinja_ctx,
+                template_dir=template_dir,
+                template_name="alzheimer_report.html",
+                output_path=pdf_path,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"PDF rendering failed: {e}") from e
 
-    report.pdf_path = pdf_path
-    report.file_path = pdf_path
-    db.add(report)
+        report.pdf_path = pdf_path
+        report.file_path = pdf_path
+        db.add(report)
+
     scan.status = ScanStatus.analyzed
     db.add(scan)
     db.commit()
@@ -516,19 +533,24 @@ def _generate_alzheimer_report_pdf(
     payload = _serialize_analysis(diagnosis, report, scan)
     _publish({"type": "analysis.created", "analysis": payload})
 
-    return JSONResponse(
-        status_code=200,
-        content={
-            "report_id": report.id,
-            "diagnosis_id": diagnosis.id,
-            "message": "Report generated successfully",
-            "prediction": prediction,
-            "confidence_pct": conf_pct,
-            "confidence_display": conf_display,
-            "generated_at_utc": run_generated_at,
-            "scan_kind": "alzheimer",
-        },
-    )
+    content: dict = {
+        "report_id": report.id,
+        "diagnosis_id": diagnosis.id,
+        "message": "Report draft saved — finalize to build PDF" if skip_pdf else "Report generated successfully",
+        "prediction": prediction,
+        "confidence_pct": conf_pct,
+        "confidence_display": conf_display,
+        "generated_at_utc": run_generated_at,
+        "scan_kind": "alzheimer",
+    }
+    if skip_pdf:
+        content["pdf_pending"] = True
+        content["findings_paragraph"] = findings_paragraph
+        content["analysis_paragraph"] = analysis_paragraph
+        content["probs_paragraph"] = probs_paragraph
+        content["disclaimer_text"] = disclaimer_text
+
+    return JSONResponse(status_code=200, content=content)
 
 
 @router.post("/view-result")
@@ -1215,6 +1237,133 @@ def generate_segmentation_report_pdf_endpoint(
 
     jinja_ctx["report_db_id"] = str(report.id)
 
+    skip_pdf = bool(body.skip_pdf)
+    if not skip_pdf:
+        try:
+            render_segmentation_report_pdf(
+                jinja_ctx,
+                template_dir=template_dir,
+                template_name="segmentation_report.html",
+                output_path=pdf_path,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"PDF rendering failed: {e}") from e
+
+        report.pdf_path = pdf_path
+        report.file_path = pdf_path
+        db.add(report)
+
+    scan.status = ScanStatus.analyzed
+    db.add(scan)
+    db.commit()
+    db.refresh(report)
+
+    payload = _serialize_analysis(diagnosis, report, scan)
+    _publish({"type": "analysis.created", "analysis": payload})
+
+    content: dict = {
+        "report_id": report.id,
+        "diagnosis_id": diagnosis.id,
+        "message": "Report draft saved — finalize to build PDF" if skip_pdf else "Report generated successfully",
+        "prediction": prediction,
+        "confidence_pct": conf_for_db,
+        "confidence_display": confidence_display,
+        "tumor_volume_mm3": round(vol_mm3, 2),
+        "tumor_volume_cm3": round(vol_cm3, 4),
+        "tumor_positive_voxels": tumor_voxels,
+        "generated_at_utc": run_generated_at,
+    }
+    if skip_pdf:
+        content["pdf_pending"] = True
+        content["findings_paragraph"] = findings_paragraph
+        content["analysis_paragraph"] = analysis_paragraph
+        content["conclusion_paragraph"] = conclusion_paragraph
+        content["disclaimer_text"] = disclaimer_text
+        content["scan_kind"] = "tumor"
+
+    return JSONResponse(status_code=200, content=content)
+
+
+def _finalize_tumor_report_pdf(
+    report: Report,
+    diagnosis: Diagnosis,
+    scan: MRIScan,
+    patient: User,
+    body: FinalizeReportPdfBody,
+    db: Session,
+) -> JSONResponse:
+    raw_meta = diagnosis.model_meta
+    if not raw_meta:
+        raise HTTPException(status_code=400, detail="Diagnosis metadata missing for this report")
+    try:
+        meta = json.loads(raw_meta)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid diagnosis metadata") from e
+    if not isinstance(meta, dict) or meta.get("report_type") != "segmentation_pdf":
+        raise HTTPException(status_code=400, detail="This finalize endpoint applies to tumor segmentation reports only")
+
+    display_name = (patient.name or patient.email or f"Patient {patient.id}").strip()
+    display_age = patient.age
+    age_str = str(display_age) if display_age is not None else "Not provided"
+    run_generated_at = str(meta.get("generated_at_utc") or "")
+    if not run_generated_at:
+        run_generated_at = datetime.now(ZoneInfo("Asia/Karachi")).strftime("%Y-%m-%d %H:%M")
+    if scan.upload_date:
+        scan_dt = scan.upload_date
+        if getattr(scan_dt, "tzinfo", None) is None:
+            scan_dt = scan_dt.replace(tzinfo=ZoneInfo("UTC"))
+        scan_date_display = scan_dt.astimezone(ZoneInfo("Asia/Karachi")).strftime("%Y-%m-%d %H:%M")
+    else:
+        scan_date_display = run_generated_at
+
+    scan_folder_label = os.path.basename((scan.file_path or "").rstrip(os.sep)) or str(scan.id)
+    vol_cm3 = float(meta["tumor_volume_cm3"])
+    vol_mm3 = float(meta["tumor_volume_mm3"])
+    tumor_voxels = int(meta.get("tumor_positive_voxels") or 0)
+    location = str(meta["tumor_location"])
+    severity = str(meta["severity"])
+    confidence_display = str(meta.get("confidence_display") or "N/A")
+    model_name = str(meta.get("model_name") or (diagnosis.model_version or "Model"))
+    prediction = diagnosis.prediction or str(meta.get("prediction") or "Unknown")
+    label_hist = json.dumps(meta.get("label_voxel_counts") or {}, sort_keys=True)
+
+    overlay_u = meta.get("overlay_image")
+    ref_png = meta.get("reference_mri_png")
+    overlay_path = _abs_path_from_uploads_url(overlay_u) if overlay_u else None
+    mri_disk = _abs_path_from_uploads_url(ref_png) if ref_png else None
+
+    disclaimer_text = "AI-generated report. Not a substitute for professional diagnosis."
+    jinja_ctx = {
+        "generated_at": run_generated_at,
+        "report_db_id": str(report.id),
+        "patient_name": display_name,
+        "patient_id": str(scan.patient_id),
+        "age": age_str,
+        "scan_date": scan_date_display,
+        "model_name": model_name,
+        "scan_folder_label": scan_folder_label,
+        "prediction_label": prediction,
+        "tumor_positive_voxels": str(tumor_voxels),
+        "findings_paragraph": body.findings_paragraph.strip(),
+        "tumor_volume_cm3": f"{vol_cm3:.2f}",
+        "tumor_volume_mm3": f"{vol_mm3:.2f}",
+        "tumor_location": location,
+        "severity": severity,
+        "confidence_score": confidence_display,
+        "analysis_paragraph": body.analysis_paragraph.strip(),
+        "analysis_heading": "Analysis",
+        "label_histogram": label_hist,
+        "mri_image_data_uri": _png_file_data_uri(mri_disk) if mri_disk and os.path.isfile(mri_disk) else None,
+        "overlay_image_data_uri": _image_file_data_uri(overlay_path) if overlay_path else None,
+        "conclusion_paragraph": "",
+        "disclaimer_text": disclaimer_text,
+    }
+
+    template_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "templates"))
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    pdf_name = f"{scan.patient_id}_{ts}.pdf"
+    pdf_path = os.path.join(_reports_dir_for_scan(scan), pdf_name)
+
     try:
         render_segmentation_report_pdf(
             jinja_ctx,
@@ -1225,32 +1374,176 @@ def generate_segmentation_report_pdf_endpoint(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF rendering failed: {e}") from e
 
+    old_disk = report.file_path or report.pdf_path
+    if old_disk and old_disk != pdf_path and os.path.isfile(old_disk):
+        try:
+            os.remove(old_disk)
+        except OSError:
+            pass
+
     report.pdf_path = pdf_path
     report.file_path = pdf_path
     db.add(report)
-    scan.status = ScanStatus.analyzed
-    db.add(scan)
     db.commit()
     db.refresh(report)
 
-    payload = _serialize_analysis(diagnosis, report, scan)
-    _publish({"type": "analysis.created", "analysis": payload})
+    return JSONResponse(
+        status_code=200,
+        content={"report_id": report.id, "message": "Report PDF ready", "scan_kind": "tumor"},
+    )
+
+
+def _finalize_alzheimer_report_pdf(
+    report: Report,
+    diagnosis: Diagnosis,
+    scan: MRIScan,
+    patient: User,
+    body: FinalizeReportPdfBody,
+    db: Session,
+) -> JSONResponse:
+    raw_meta = diagnosis.model_meta
+    if not raw_meta:
+        raise HTTPException(status_code=400, detail="Diagnosis metadata missing for this report")
+    try:
+        meta = json.loads(raw_meta)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid diagnosis metadata") from e
+    if not isinstance(meta, dict) or meta.get("report_type") != "alzheimer_pdf":
+        raise HTTPException(status_code=400, detail="This finalize endpoint applies to Alzheimer reports only")
+
+    display_name = (patient.name or patient.email or f"Patient {patient.id}").strip()
+    display_age = patient.age
+    age_str = str(display_age) if display_age is not None else "Not provided"
+    run_generated_at = str(meta.get("generated_at_utc") or "")
+    if not run_generated_at:
+        run_generated_at = datetime.now(ZoneInfo("Asia/Karachi")).strftime("%Y-%m-%d %H:%M")
+    if scan.upload_date:
+        scan_dt = scan.upload_date
+        if getattr(scan_dt, "tzinfo", None) is None:
+            scan_dt = scan_dt.replace(tzinfo=ZoneInfo("UTC"))
+        scan_date_display = scan_dt.astimezone(ZoneInfo("Asia/Karachi")).strftime("%Y-%m-%d %H:%M")
+    else:
+        scan_date_display = run_generated_at
+
+    prediction = diagnosis.prediction or str(meta.get("prediction") or "Prediction unavailable")
+    conf_pct = float(meta.get("confidence") if meta.get("confidence") is not None else (diagnosis.confidence or 0.0))
+    conf_display = f"{conf_pct:.2f}" if math.isfinite(conf_pct) else "N/A"
+    probs = meta.get("probs") or {}
+    if not isinstance(probs, dict):
+        probs = {}
+    if body.probs_paragraph is None:
+        probs_paragraph = "; ".join(f"{k}: {v}%" for k, v in probs.items()) if probs else "N/A"
+    else:
+        probs_paragraph = body.probs_paragraph.strip()
+    label_histogram = json.dumps(probs, sort_keys=True) if probs else "{}"
+    num_classes = len(probs)
+    model_name = str(meta.get("model_name") or (diagnosis.model_version or "Alzheimer classifier"))
+    disclaimer_text = "AI-generated report. Not a substitute for professional diagnosis."
+
+    img_url = meta.get("input_image")
+    path = _abs_path_from_uploads_url(img_url) if img_url else None
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=400, detail="Source image for this report is no longer on disk")
+
+    jinja_ctx = {
+        "generated_at": run_generated_at,
+        "report_db_id": str(report.id),
+        "patient_name": display_name,
+        "patient_id": str(scan.patient_id),
+        "age": age_str,
+        "scan_date": scan_date_display,
+        "model_name": model_name,
+        "prediction_label": prediction,
+        "confidence_score": conf_display,
+        "num_classes": str(num_classes),
+        "probs_paragraph": probs_paragraph,
+        "analysis_paragraph": body.analysis_paragraph.strip(),
+        "label_histogram": label_histogram,
+        "findings_paragraph": body.findings_paragraph.strip(),
+        "mri_image_data_uri": None,
+        "overlay_image_data_uri": _image_file_data_uri(path),
+        "disclaimer_text": disclaimer_text,
+    }
+
+    template_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "templates"))
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    pdf_name = f"alz_{scan.patient_id}_{ts}.pdf"
+    pdf_path = os.path.join(_reports_dir_for_scan(scan), pdf_name)
+
+    try:
+        render_segmentation_report_pdf(
+            jinja_ctx,
+            template_dir=template_dir,
+            template_name="alzheimer_report.html",
+            output_path=pdf_path,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF rendering failed: {e}") from e
+
+    old_disk = report.file_path or report.pdf_path
+    if old_disk and old_disk != pdf_path and os.path.isfile(old_disk):
+        try:
+            os.remove(old_disk)
+        except OSError:
+            pass
+
+    report.pdf_path = pdf_path
+    report.file_path = pdf_path
+    db.add(report)
+    db.commit()
+    db.refresh(report)
 
     return JSONResponse(
         status_code=200,
-        content={
-            "report_id": report.id,
-            "diagnosis_id": diagnosis.id,
-            "message": "Report generated successfully",
-            "prediction": prediction,
-            "confidence_pct": conf_for_db,
-            "confidence_display": confidence_display,
-            "tumor_volume_mm3": round(vol_mm3, 2),
-            "tumor_volume_cm3": round(vol_cm3, 4),
-            "tumor_positive_voxels": tumor_voxels,
-            "generated_at_utc": run_generated_at,
-        },
+        content={"report_id": report.id, "message": "Report PDF ready", "scan_kind": "alzheimer"},
     )
+
+
+@core_router.post("/finalize-report-pdf")
+def finalize_report_pdf_endpoint(
+    body: FinalizeReportPdfBody,
+    db: Session = Depends(get_db),
+    current=Depends(role_required("doctor", "admin")),
+):
+    """Build the stored PDF for a report created with ``skip_pdf`` on ``POST /api/generate-report``."""
+    report = (
+        db.query(Report)
+        .options(joinedload(Report.diagnosis))
+        .filter(Report.id == body.report_id)
+        .first()
+    )
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if report.doctor_id != current.id and (current.role or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    diagnosis = report.diagnosis
+    if not diagnosis:
+        raise HTTPException(status_code=400, detail="Report has no diagnosis")
+
+    scan = db.query(MRIScan).filter(MRIScan.id == diagnosis.scan_id).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.doctor_id != current.id and (current.role or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="Unauthorized: You are not assigned to this scan")
+
+    patient = db.query(User).filter(User.id == scan.patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    raw_meta = diagnosis.model_meta or ""
+    try:
+        meta = json.loads(raw_meta) if raw_meta else {}
+    except json.JSONDecodeError:
+        meta = {}
+    rtype = meta.get("report_type") if isinstance(meta, dict) else None
+
+    if rtype == "segmentation_pdf":
+        return _finalize_tumor_report_pdf(report, diagnosis, scan, patient, body, db)
+    if rtype == "alzheimer_pdf":
+        return _finalize_alzheimer_report_pdf(report, diagnosis, scan, patient, body, db)
+
+    raise HTTPException(status_code=400, detail="Unknown report type; cannot finalize PDF")
 
 
 @core_router.post("/send-report")

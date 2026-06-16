@@ -7,14 +7,11 @@ const roleFields = {
     { name: "fullName", label: "Full Name", type: "text" },
     { name: "email", label: "Email", type: "email" },
     { name: "password", label: "Password", type: "password" },
-    { name: "age", label: "Age", type: "number" },
   ],
   Doctor: [
     { name: "fullName", label: "Full Name", type: "text" },
     { name: "email", label: "Email", type: "email" },
     { name: "password", label: "Password", type: "password" },
-    { name: "license", label: "Medical License #", type: "text" },
-    { name: "specialty", label: "Specialty", type: "text" },
   ],
   // Admin signups are not allowed from the public registration form.
   // Admins must be created by a Super Admin (managed centrally).
@@ -66,7 +63,6 @@ export default function Register() {
         password: form.password,
         role: backendRole,
         name: form.fullName,
-        age: form.age ? Number(form.age) : undefined,
       });
 
       setLoading(false);
