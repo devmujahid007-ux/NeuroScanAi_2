@@ -9,6 +9,15 @@ A web application for brain tumor and Alzheimer’s disease assistance from MRI 
 - **Dashboards** — Different views per role (patients, doctors, admins)
 - **API docs** — Interactive OpenAPI UI at `/docs` when the backend is running
 
+## Trained Deep Learning Models Used
+
+This project uses two main AI models for medical image analysis:
+
+- Tumor segmentation model: MONAI BraTS SegResNet-based segmentation pipeline, loaded from the bundled model directory under [backend/models/brats_model/brats_mri_segmentation](backend/models/brats_model/brats_mri_segmentation)
+- Alzheimer classification model: a ResNet-based classifier using the checkpoint file named alz_model_accurate.pth, which is used for 4-class Alzheimer stage prediction
+
+These model files are expected to be available locally for inference. If they are missing, the analysis endpoints will not work properly until the appropriate model weights are added.
+
 ## Tech stack
 
 | Layer | Technologies |
